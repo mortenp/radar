@@ -6,6 +6,8 @@
 #include "driver/uart.h"
 #include "driver/gpio.h"
 
+//#include "esp_idf_lib_helpers.h"
+
 #define LD2410_UART_NUM         UART_NUM_1
 #define LD2410_UART_BAUD_RATE   115200
 #define LD2410_BUF_SIZE         1024
@@ -38,9 +40,25 @@
 #define LD2410_CMD_SET_DISTANCE_RESOLUTION    0xAA
 
 
+#define MIN(a, b) ({ \
+    typeof(a) _a = (a); \
+    typeof(b) _b = (b); \
+    _a < _b ? _a : _b; \
+})
+
+#define LD2410_RX_BUFFER_SIZE 256
+#define LD2410_MAX_FRAME 256
+#define LD2410_SAFE_READ_LEN  MIN(128, LD2410_MAX_FRAME-10)  // Operational buffer
+
+
 // Gate definitions
 #define LD2410_MAX_GATES        9
 #define MAX_WINDOW_SIZE         50
+#define OUTLIER_THRESHOLD 500  // cm (adjust based on your observed noise)
+// Near range (0-2m): tighter filtering
+#define NEAR_NOISE_THRESHOLD 50  // cm 
+// Far range (>2m): looser filtering  
+#define FAR_NOISE_THRESHOLD 150   // cm
 
 // Target states
 typedef enum {
@@ -104,6 +122,7 @@ typedef struct {
     bool bluetooth_enabled;
     bool engineering_mode;
     distance_resolution_t distance_resolution;  // NEW: distance resolution
+ 
 } ld2410_config_t;
 
 typedef struct {
@@ -126,8 +145,9 @@ typedef struct {
     uint32_t presence_total_reads;
     
     // Frame parsing state
-    uint8_t rx_buffer[256];
-    uint8_t rx_buffer_position;
+    uint8_t rx_buffer[LD2410_RX_BUFFER_SIZE];
+    uint16_t rx_buffer_position;  // Now matches buffer max size
+
     uint32_t last_periodic_millis;
     
     // Statistics
@@ -180,6 +200,7 @@ esp_err_t ld2410_load_walking_aid_config(ld2410_config_t *config);
 esp_err_t moving_average_init(moving_average_t *avg, uint8_t window_size);
 void moving_average_cleanup(moving_average_t *avg);
 uint16_t moving_average_add_sample(moving_average_t *avg, uint16_t sample);
+uint16_t stabilized_moving_average_add_sample(moving_average_t *avg, uint16_t sample) ;
 void moving_average_reset(moving_average_t *avg);
 
 #ifdef __cplusplus
