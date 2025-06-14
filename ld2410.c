@@ -9,6 +9,7 @@
 static const char *TAG = "LD2410";
 
 //esp_log_level_set(TAG, ESP_LOG_DEBUG);
+#define NOISE_THRESHOLD 30  // Minimum movement energy to consider valid
 
 
 // Moving average functions (same as before)
@@ -72,6 +73,60 @@ uint16_t moving_average_add_sample(moving_average_t *avg, uint16_t sample) {
     uint8_t divisor = avg->is_full ? avg->window_size : avg->count;
     avg->average = (divisor > 0) ? (avg->sum / divisor) : sample;
     
+    return avg->average;
+}
+
+uint16_t stabilized_moving_average_add_sample(moving_average_t *avg, uint16_t sample) {
+
+    // Reject invalid samples before processing
+    if (avg == NULL || sample == 0 || sample > 600) { // 600cm max for walking aid
+        return avg->average; // Return last valid average
+    }
+// At start of moving_average_add_sample():
+ESP_LOGD(TAG, "[MA] New sample: %3dcm | Last avg: %3dcm | Buffer count: %d/%d", 
+         sample, avg->average, avg->count, avg->window_size);
+
+
+    // 1. Outlier rejection
+    if(avg->count > 3) {  // Need at least 3 samples for validation
+        int16_t deviation = abs(sample - avg->average);
+        if(deviation > OUTLIER_THRESHOLD) {
+            ESP_LOGW(TAG, "[MA] OUTLIER REJECTED: %3dcm (Threshold: ±%dcm)", 
+             sample, OUTLIER_THRESHOLD);
+            ESP_LOGW(TAG, "Outlier rejected: %d (avg: %d)", sample, avg->average);
+            return avg->average; // Skip this sample
+        }
+    }
+
+    // 2. Weight recent samples higher (optional)
+    uint16_t weighted_sample = (sample + avg->last_value * 0.3) / 1.3;
+
+    // 3. Original moving average logic (with weighted value)
+    if(avg->is_full) {
+        avg->sum -= avg->buffer[avg->current_index];
+    }
+    
+    avg->buffer[avg->current_index] = weighted_sample;
+    avg->sum += weighted_sample;
+    avg->current_index = (avg->current_index + 1) % avg->window_size;
+
+    if(!avg->is_full) {
+        avg->count++;
+        if(avg->count >= avg->window_size) {
+            avg->is_full = true;
+        }
+    }
+
+    // 4. Improved trend calculation (3-point moving slope)
+    avg->trend = (sample + avg->last_value)/2 - (avg->buffer[(avg->current_index-2)%avg->window_size]);
+    
+    avg->last_value = sample;
+    avg->average = avg->sum / (avg->is_full ? avg->window_size : avg->count);
+ 
+    // After update:
+ESP_LOGD(TAG, "[MA] Updated avg: %3dcm | Trend: %+3dcm | Buffer: %s", 
+         avg->average, avg->trend, avg->is_full ? "FULL" : "filling");
+
     return avg->average;
 }
 
@@ -600,13 +655,13 @@ bool ld2410_parse_data_frame(ld2410_sensor_t *sensor, uint8_t *buffer, int len) 
 );
 
 
-    sensor->target_data.moving_target_distance = moving_average_add_sample(
+    sensor->target_data.moving_target_distance = stabilized_moving_average_add_sample(
         &sensor->moving_distance_avg, sensor->target_data.raw_moving_target_distance);
 
-    sensor->target_data.stationary_target_distance = moving_average_add_sample(
+    sensor->target_data.stationary_target_distance = stabilized_moving_average_add_sample(
         &sensor->stationary_distance_avg, sensor->target_data.raw_stationary_target_distance);
 
-    sensor->target_data.detection_distance = moving_average_add_sample(
+    sensor->target_data.detection_distance = stabilized_moving_average_add_sample(
         &sensor->detection_distance_avg, sensor->target_data.raw_detection_distance);
     
     ESP_LOGD(TAG, "✅ PARSED (%d bytes): State=%d, Move=%dcm/%d, Still=%dcm/%d, Det=%dcm", 
@@ -649,26 +704,44 @@ void debug_frame_variations(uint8_t *buffer, int len) {
 
 // ESPHome-style readline function
 void ld2410_readline(ld2410_sensor_t *sensor) {
-    uint8_t buffer[64]; // overflow?
-    int available = uart_read_bytes(LD2410_UART_NUM, buffer, sizeof(buffer), 10 / portTICK_PERIOD_MS);
-    
-    if (available <= 0) {
+    uint8_t buffer[LD2410_MAX_FRAME];
+    const int timeout_ms = 10;
+    const int safe_read_len = MIN(128, LD2410_MAX_FRAME - 10);  // Safe margin
+
+    // First read - limited to safe length
+    int len = uart_read_bytes(LD2410_UART_NUM, 
+                            buffer, 
+                            safe_read_len,
+                            timeout_ms / portTICK_PERIOD_MS);
+
+    // Error handling
+    if (len == -1) {
+        ESP_LOGE(TAG, "UART read error");
         return;
     }
-    
-    for (int i = 0; i < available; i++) {
-        uint8_t byte = buffer[i];
-        
-        if (sensor->rx_buffer_position < sizeof(sensor->rx_buffer)) {
-            sensor->rx_buffer[sensor->rx_buffer_position++] = byte;
-        } else {
-            // Buffer overflow, reset
-            ESP_LOGW(TAG, "RX buffer overflow, resetting");
-            sensor->rx_buffer_position = 0;
-            sensor->invalid_frames++;
-            continue;
-        }
-        
+    if (len == 0) {
+        ESP_LOGD(TAG, "No data available");
+        return;
+    }
+
+    // Buffer safety checks
+    if (len >= (LD2410_MAX_FRAME - 10)) {
+        ESP_LOGW(TAG, "Approaching buffer limit: %d/%d bytes", len, LD2410_MAX_FRAME);
+    }
+
+    // Process received data
+    for (int i = 0; i < len; i++) {
+
+        if (sensor->rx_buffer_position >= LD2410_RX_BUFFER_SIZE) {
+    ESP_LOGE(TAG, "Buffer overflow (pos %u >= size %u)", 
+            sensor->rx_buffer_position, LD2410_RX_BUFFER_SIZE);
+    sensor->rx_buffer_position = 0;
+    sensor->invalid_frames++;
+    return;
+}
+
+        sensor->rx_buffer[sensor->rx_buffer_position++] = buffer[i];
+          
         // Check for complete frame
         if (sensor->rx_buffer_position >= 4) {
             // Check for frame header (F4 F3 F2 F1)
