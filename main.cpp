@@ -18,6 +18,7 @@
  #include "led_strip_rmt.h"
  #include "math.h"
 
+
  ////// pins
 #include "driver/gpio.h"
 // polling gpio 
@@ -49,7 +50,7 @@ static const char *TAG = "WALKING_AID";
 //#define STATUS_LED_PIN          GPIO_NUM_38  // RGB LED pin
 
 // Detection parameters
-#define MOVING_AVERAGE_WINDOW_SIZE  20
+#define MOVING_AVERAGE_WINDOW_SIZE  15
 
 // PWM configuration for piezo beeper
 #define BEEPER_LEDC_TIMER       LEDC_TIMER_0
@@ -67,7 +68,7 @@ static const char *TAG = "WALKING_AID";
   int ALERT_FAR_LIMIT  = 200;
 
 
-
+#define HYSTERESIS 15  // cm
   /*
   
 {"version": 2, "values": {"LOG_DEFAULT_LEVEL_INFO": false, "LOG_DEFAULT_LEVEL_DEBUG": true, "LOG_DEFAULT_LEVEL": 4, "LOG_MAXIMUM_EQUALS_DEFAULT": true}, "ranges": {"LWIP_TCPIP_TASK_STACK_SIZE": [2560, 65536]}, "visible": {"LOG_MAXIMUM_LEVEL_DEBUG": false}}
@@ -420,13 +421,13 @@ void set_beeper_tone(uint32_t frequency_hz, bool enable) {
 
 // Determine alert level based on distance
 alert_level_t get_alert_level(uint16_t distance_cm) {
-    if (distance_cm <= ALERT_IMMEDIATE_LIMIT) {
+    if (distance_cm <= ALERT_IMMEDIATE_LIMIT + HYSTERESIS) {
         return ALERT_IMMEDIATE;
-    } else if (distance_cm <= ALERT_CLOSE_LIMIT) {
+    } else if (distance_cm <= ALERT_CLOSE_LIMIT + HYSTERESIS) {
         return ALERT_CLOSE;
-    } else if (distance_cm <= ALERT_MEDIUM_LIMIT) {
+    } else if (distance_cm <= ALERT_MEDIUM_LIMIT + HYSTERESIS) {
         return ALERT_MEDIUM;
-    } else if (distance_cm <= ALERT_FAR_LIMIT) {
+    } else if (distance_cm <= ALERT_FAR_LIMIT + HYSTERESIS) {
         return ALERT_FAR;
     } else {
         return ALERT_SILENT;
@@ -434,7 +435,9 @@ alert_level_t get_alert_level(uint16_t distance_cm) {
 }
 
 // Update beeper based on current alert level
-void update_beeper_alerts(alert_level_t new_level) {
+//void update_beeper_alerts(alert_level_t new_level) {
+    void update_beeper_alerts(alert_level_t new_level, ld2410_sensor_t *sensor) {
+
     uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
     
     // Check if alert level changed
@@ -444,15 +447,30 @@ void update_beeper_alerts(alert_level_t new_level) {
         beeper.is_beeping = false;
         set_beeper_tone(0, false);  // Stop current beep
         
-//gpio_set_level(STATUS_LED_PIN, 1);
+ESP_LOGI(TAG, 
+    "🚨 ALERT: %s → %s\n"
+    "   Distance: Raw=%dcm | Avg=%dcm\n"
+    "   Thresholds: Far=%dcm | Med=%dcm | Close=%dcm\n"
+    "   Energy: Move=%d%% | Still=%d%%",
+    alert_configs[beeper.current_level].description,
+    alert_configs[new_level].description,
+    sensor->target_data.raw_detection_distance,
+    sensor->stationary_distance_avg.average,
+    ALERT_FAR_LIMIT,
+    ALERT_MEDIUM_LIMIT,
+    ALERT_CLOSE_LIMIT,
+    sensor->target_data.moving_target_energy,
+    sensor->target_data.stationary_target_energy
+);          
+ //       ESP_LOGI(TAG, "🔊 Alert level changed to: %s", alert_configs[new_level].description);
 
-        ESP_LOGI(TAG, "🔊 Alert level changed to: %s", alert_configs[new_level].description);
-    }
-    
-    const alert_config_t *config = &alert_configs[beeper.current_level];
-
+  
  
+
+}
     
+   const alert_config_t *config = &alert_configs[beeper.current_level];
+
     // Handle silent mode
     if (beeper.current_level == ALERT_SILENT) {
         if (beeper.is_beeping) {
@@ -484,6 +502,7 @@ void update_beeper_alerts(alert_level_t new_level) {
         }
     }
 }
+
 
 void load_safe_config(ld2410_config_t *config) {
     ld2410_load_walking_aid_config(config);  // Start with defaults
@@ -552,6 +571,10 @@ config->distance_resolution =  DISTANCE_RESOLUTION_0_2; //DISTANCE_RESOLUTION_0_
 
 ld2410_set_max_distances (8, 8);
 //max_moving_gate, max_stationary_gate
+ALERT_IMMEDIATE_LIMIT = 60;
+ALERT_CLOSE_LIMIT  = 160;
+ALERT_MEDIUM_LIMIT  = 250;
+ALERT_FAR_LIMIT  = 300;
 
     // Balanced sensitivity for normal use
     for (int gate = 0; gate < 3; gate++) {
@@ -725,6 +748,28 @@ void test_multiple_baud_rates(void) {
     uart_flush(LD2410_UART_NUM);
 }
 
+
+void process_sample(ld2410_sensor_t* sensor) {
+
+    ESP_LOGD(TAG, "Validation: Raw=%dcm → Valid=%s → Avg=%dcm", 
+        sensor->target_data.raw_detection_distance,
+        (sensor->target_data.target_state != LD2410_TARGET_NONE) ? "YES" : "NO",
+        sensor->detection_distance_avg.average);
+
+        
+  // Skip invalid data
+  if(sensor->target_data.raw_detection_distance > 600) return;
+  
+  // Apply temporal filter
+  static uint16_t last_valid_dist = 0;
+  if(abs(sensor->target_data.raw_detection_distance - last_valid_dist) > 100) {
+    ESP_LOGI(TAG, "Implausible jump: %d->%d", last_valid_dist, sensor->target_data.raw_detection_distance);
+    return;
+  }
+  last_valid_dist = sensor->target_data.raw_detection_distance;
+}
+
+
 void sensor_task(void *pvParameters) {
     ld2410_sensor_t sensor = {0};
     ld2410_config_t config = {0};
@@ -800,7 +845,9 @@ void sensor_task(void *pvParameters) {
 
    load_balanced_config(&config);
  //   load_longrange_config(&config);
-
+ 
+    config.max_move_distance_gate = 6;  // Reduce range for better focus
+    config.move_thresholds[0] = 60;     // Higher sensitivity near sensor
 
  ret = ld2410_apply_config_safely(&config);
     if (ret != ESP_OK) {
@@ -861,6 +908,11 @@ void sensor_task(void *pvParameters) {
             ret = ld2410_read_data(&sensor);
             
             if (ret == ESP_OK) {
+
+                process_sample(&sensor); // new
+ //               ESP_LOGI(TAG,"ld2410_read_data OK");
+
+
                 // Sensor data processing (same as before)
                 uint16_t primary_distance = sensor.target_data.detection_distance;
                 const char* obstacle_type = "None";
@@ -879,7 +931,7 @@ void sensor_task(void *pvParameters) {
                 
          //       alert_level_t alert_level = get_alert_level(primary_distance);
                 alert_level_t alert_level = get_alert_level(sensor.stationary_distance_avg.average);
-                update_beeper_alerts(alert_level);
+                update_beeper_alerts(alert_level, &sensor);
                 
                 const char* alert_emoji = "🟢";
                 const char* alert_name = "CLEAR";
@@ -890,7 +942,14 @@ void sensor_task(void *pvParameters) {
                     case ALERT_FAR:       alert_emoji = "🔵"; alert_name = "FAR"; break;
                     default:              alert_emoji = "🟢"; alert_name = "CLEAR"; break;
                 }
-                
+ /*              
+                // When alert level changes:
+ESP_LOGI(TAG, "🚨 ALERT: %s (Distance: %3dcm → Avg: %3dcm ±%dcm)", 
+         alert_configs[alert_level].description, 
+         sensor.target_data.stationary_target_distance,
+         sensor.stationary_distance_avg.average,
+         abs(sensor.target_data.stationary_target_distance - sensor.stationary_distance_avg.average));
+*/ 
            //     ESP_LOGI(TAG, "📍 %s %s - %s at %dcm | Beeps: %lu", 
            //              alert_emoji, alert_name, obstacle_type, primary_distance, beeper.beep_count);
 
@@ -919,11 +978,12 @@ void sensor_task(void *pvParameters) {
             }
             
             if (sensor.presence_pin_enabled) {
+            //     ESP_LOGI(TAG,"ld2410_read_presence_pin now");
                 ld2410_read_presence_pin(&sensor);
             }
         }
         
-        update_beeper_alerts(beeper.current_level);
+        update_beeper_alerts(beeper.current_level, &sensor);
         
 
         // Statistics
