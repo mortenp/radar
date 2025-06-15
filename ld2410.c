@@ -44,7 +44,7 @@ void moving_average_cleanup(moving_average_t *avg) {
     }
 }
 
-uint16_t moving_average_add_sample(moving_average_t *avg, uint16_t sample) {
+uint16_t moving_average_add_sample(moving_average_t *avg, ld2410_sensor_t *sensor, uint16_t sample) {
     if (avg == NULL || avg->buffer == NULL) {
         return sample;
     }
@@ -76,58 +76,58 @@ uint16_t moving_average_add_sample(moving_average_t *avg, uint16_t sample) {
     return avg->average;
 }
 
-uint16_t stabilized_moving_average_add_sample(moving_average_t *avg, uint16_t sample) {
+#define MAX_INITIAL_JUMP_CM   150  // Allow bigger jumps on new detections
+#define MAX_SUSTAINED_JUMP_CM  80  // Tighten after confirmation
 
-    // Reject invalid samples before processing
-    if (avg == NULL || sample == 0 || sample > 600) { // 600cm max for walking aid
-        return avg->average; // Return last valid average
+
+uint16_t stabilized_moving_average_add_sample(moving_average_t *avg, ld2410_sensor_t *sensor, uint16_t sample) {
+    static uint16_t last_accepted = 0;
+    uint8_t energy = MAX(sensor->target_data.moving_target_energy,
+                        sensor->target_data.stationary_target_energy);
+
+    // Rule 1: Allow larger jumps for new detections
+    if (last_accepted == 0) {
+        last_accepted = sample;
+        return sample;  // First sample always passes
     }
-// At start of moving_average_add_sample():
-ESP_LOGD(TAG, "[MA] New sample: %3dcm | Last avg: %3dcm | Buffer count: %d/%d", 
-         sample, avg->average, avg->count, avg->window_size);
 
+    // Rule 2: High-energy samples get more leeway
+    uint16_t max_allowed_jump = (energy > 70) ? MAX_INITIAL_JUMP_CM : MAX_SUSTAINED_JUMP_CM;
 
-    // 1. Outlier rejection
-    if(avg->count > 3) {  // Need at least 3 samples for validation
-        int16_t deviation = abs(sample - avg->average);
-        if(deviation > OUTLIER_THRESHOLD) {
-            ESP_LOGW(TAG, "[MA] OUTLIER REJECTED: %3dcm (Threshold: ±%dcm)", 
-             sample, OUTLIER_THRESHOLD);
-            ESP_LOGW(TAG, "Outlier rejected: %d (avg: %d)", sample, avg->average);
-            return avg->average; // Skip this sample
+    // Rule 3: If within bounds OR energy >90%, accept immediately
+    if (abs(sample - last_accepted) < max_allowed_jump || energy > 90) {
+        last_accepted = sample;
+        return sample;
+    }
+
+    // Rule 4: For outliers, check if next 2 samples agree
+    static uint8_t outlier_count = 0;
+    static uint16_t outlier_sum = 0;
+    outlier_sum += sample;
+    outlier_count++;
+
+    if (outlier_count >= 2) {  // After 3 outliers
+        uint16_t avg_outlier = outlier_sum / outlier_count;
+        if (abs(avg_outlier - last_accepted) > max_allowed_jump) {
+            // Persistent outlier - likely real movement
+            last_accepted = avg_outlier;
+            outlier_count = 0;
+            outlier_sum = 0;
+            ESP_LOGI(TAG, "Accepting sustained change: %d->%dcm", 
+                    last_accepted, avg_outlier);
+            return avg_outlier;
+        } else {
+            // Temporary noise - reject
+            ESP_LOGW(TAG, "Rejected transient jump: %d->%dcm (E:%d%%)",
+                    last_accepted, sample, energy);
+            return last_accepted;
         }
     }
 
-    // 2. Weight recent samples higher (optional)
-    uint16_t weighted_sample = (sample + avg->last_value * 0.3) / 1.3;
-
-    // 3. Original moving average logic (with weighted value)
-    if(avg->is_full) {
-        avg->sum -= avg->buffer[avg->current_index];
-    }
-    
-    avg->buffer[avg->current_index] = weighted_sample;
-    avg->sum += weighted_sample;
-    avg->current_index = (avg->current_index + 1) % avg->window_size;
-
-    if(!avg->is_full) {
-        avg->count++;
-        if(avg->count >= avg->window_size) {
-            avg->is_full = true;
-        }
-    }
-
-    // 4. Improved trend calculation (3-point moving slope)
-    avg->trend = (sample + avg->last_value)/2 - (avg->buffer[(avg->current_index-2)%avg->window_size]);
-    
-    avg->last_value = sample;
-    avg->average = avg->sum / (avg->is_full ? avg->window_size : avg->count);
- 
-    // After update:
-ESP_LOGD(TAG, "[MA] Updated avg: %3dcm | Trend: %+3dcm | Buffer: %s", 
-         avg->average, avg->trend, avg->is_full ? "FULL" : "filling");
-
-    return avg->average;
+ESP_LOGD(TAG, "Jump Check: Last=%dcm New=%dcm Allowed=%dcm Energy=%d%% %s",
+        last_accepted, sample, max_allowed_jump, energy,
+        (abs(sample - last_accepted) < max_allowed_jump) ? "ACCEPTED" : "REJECTED");
+    return last_accepted;
 }
 
 void moving_average_reset(moving_average_t *avg) {
@@ -511,7 +511,7 @@ bool ld2410_read_presence_pin(ld2410_sensor_t *sensor) {
 }
 
 esp_err_t ld2410_init_moving_averages(ld2410_sensor_t *sensor, uint8_t window_size) {
-    if (sensor == NULL) {
+    if (sensor == NULL || window_size == 0 || window_size > MAX_WINDOW_SIZE) {
         return ESP_ERR_INVALID_ARG;
     }
     
@@ -537,7 +537,18 @@ esp_err_t ld2410_init_moving_averages(ld2410_sensor_t *sensor, uint8_t window_si
         moving_average_cleanup(&sensor->stationary_distance_avg);
         return ret;
     }
-    
+   
+       // Explicitly reset counters (critical!)
+    sensor->moving_distance_avg.count = 0;
+    sensor->stationary_distance_avg.count = 0;
+    sensor->detection_distance_avg.count = 0;
+
+
+        // NEW: Initialize confidence tracking
+    sensor->target_confirmed = false;
+    sensor->target_confidence = 0;
+
+
     ESP_LOGI(TAG, "Moving averages initialized with window size: %d", window_size);
     return ESP_OK;
 }
@@ -569,9 +580,20 @@ esp_err_t ld2410_init(uint8_t tx_pin, uint8_t rx_pin) {
         .source_clk = UART_SCLK_DEFAULT,
     };
 
+/*
+uart_param_config(UART_NUM_1, &(uart_config_t){
+    .baud_rate = 256000,
+    .data_bits = UART_DATA_8_BITS,
+    .parity = UART_PARITY_EVEN,  // Enable parity checking
+    .stop_bits = UART_STOP_BITS_2,
+    .flow_ctrl = UART_HW_FLOWCTRL_DISABLE
+});
+*/
+ 
     esp_err_t ret = uart_driver_install(LD2410_UART_NUM, LD2410_BUF_SIZE * 2, 0, 0, NULL, 0);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to install UART driver: %s", esp_err_to_name(ret));
+ 
         return ret;
     }
 
@@ -590,6 +612,13 @@ esp_err_t ld2410_init(uint8_t tx_pin, uint8_t rx_pin) {
     }
 
     uart_flush(LD2410_UART_NUM);
+
+     
+ //   uart_set_line_inverse(LD2410_UART_NUM, UART_SIGNAL_TXD_INV | UART_SIGNAL_RXD_INV);  // Reduce noise
+
+
+
+
     ESP_LOGI(TAG, "LD2410 UART initialized successfully");
     return ESP_OK;
 }
@@ -620,6 +649,8 @@ bool ld2410_parse_data_frame(ld2410_sensor_t *sensor, uint8_t *buffer, int len) 
     sensor->target_data.stationary_target_energy = data[6];
     sensor->target_data.raw_detection_distance = data[7] | (data[8] << 8);
     
+ESP_LOGD(TAG, "raw_detection_distance: %d ", sensor->target_data.raw_detection_distance );
+
     // Validate the parsed data
     if (sensor->target_data.target_state > 3 || 
         sensor->target_data.raw_moving_target_distance > 2000 ||
@@ -654,22 +685,36 @@ bool ld2410_parse_data_frame(ld2410_sensor_t *sensor, uint8_t *buffer, int len) 
             sensor->detection_distance_avg
 );
 
+//uint16_t stabilized_moving_average_add_sample(moving_average_t *avg, ld2410_sensor_t *sensor, uint16_t sample)
 
-    sensor->target_data.moving_target_distance = stabilized_moving_average_add_sample(
-        &sensor->moving_distance_avg, sensor->target_data.raw_moving_target_distance);
+//sensor.target_data.stationary_target_distance, 
+                       
+static int confidence_limit = 80;
 
-    sensor->target_data.stationary_target_distance = stabilized_moving_average_add_sample(
-        &sensor->stationary_distance_avg, sensor->target_data.raw_stationary_target_distance);
+                        
+ if(sensor->target_data.moving_target_energy > confidence_limit){
+    sensor->target_data.moving_target_distance = moving_average_add_sample(
+        &sensor->moving_distance_avg, sensor, sensor->target_data.raw_moving_target_distance);
+    }
 
-    sensor->target_data.detection_distance = stabilized_moving_average_add_sample(
-        &sensor->detection_distance_avg, sensor->target_data.raw_detection_distance);
-    
-    ESP_LOGD(TAG, "✅ PARSED (%d bytes): State=%d, Move=%dcm/%d, Still=%dcm/%d, Det=%dcm", 
+ if(sensor->target_data.stationary_target_energy > confidence_limit){
+    sensor->target_data.stationary_target_distance = moving_average_add_sample(
+        &sensor->stationary_distance_avg, sensor, sensor->target_data.raw_stationary_target_distance);
+    }
+
+     if(sensor->target_data.raw_detection_distance > 0){
+    sensor->target_data.raw_detection_distance = moving_average_add_sample(
+        &sensor->detection_distance_avg, sensor, sensor->target_data.raw_detection_distance);
+    }
+
+    ESP_LOGD(TAG, "✅ PARSED (%d bytes): State=%d, Move=%dcm/%d, Still=%dcm/%d, Det raw=%dcm, Det=%dcm", 
              len,
              sensor->target_data.target_state,
              sensor->target_data.moving_target_distance, sensor->target_data.moving_target_energy,
              sensor->target_data.stationary_target_distance, sensor->target_data.stationary_target_energy,
-             sensor->target_data.detection_distance);
+             sensor->target_data.raw_detection_distance,
+             sensor->target_data.detection_distance
+            );
     
     return true;
 }
