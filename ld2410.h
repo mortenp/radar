@@ -39,12 +39,23 @@
 #define LD2410_CMD_QUERY_DISTANCE_RESOLUTION  0xAB
 #define LD2410_CMD_SET_DISTANCE_RESOLUTION    0xAA
 
+#define MAX_TRUSTED_JUMP_CM  100  // Reject jumps >80cm between samples
+#define MIN_CONFIDENCE_ENERGY 15 // Minimum energy % to consider valid
+
+#define DEFAULT_WINDOW_SIZE     15  // Baseline for new buffers
+
 
 #define MIN(a, b) ({ \
     typeof(a) _a = (a); \
     typeof(b) _b = (b); \
     _a < _b ? _a : _b; \
 })
+
+#define MAX(a, b) (((a) > (b)) ? (a) : (b))
+
+// Simple clamp macro
+#define CLAMP(val, min, max) ((val) < (min) ? (min) : ((val) > (max) ? (max) : (val)))
+
 
 #define LD2410_RX_BUFFER_SIZE 256
 #define LD2410_MAX_FRAME 256
@@ -155,6 +166,10 @@ typedef struct {
     uint32_t valid_frames_parsed;
     uint32_t invalid_frames;
     uint32_t engineering_frames_received;
+
+    bool target_confirmed;          // New: Track verified targets
+    uint8_t target_confidence;      // New: Confidence percentage (0-100)
+
 } ld2410_sensor_t;
 
 #ifdef __cplusplus
@@ -199,8 +214,9 @@ esp_err_t ld2410_load_walking_aid_config(ld2410_config_t *config);
 // Moving average functions
 esp_err_t moving_average_init(moving_average_t *avg, uint8_t window_size);
 void moving_average_cleanup(moving_average_t *avg);
-uint16_t moving_average_add_sample(moving_average_t *avg, uint16_t sample);
-uint16_t stabilized_moving_average_add_sample(moving_average_t *avg, uint16_t sample) ;
+uint16_t moving_average_add_sample(moving_average_t *avg, ld2410_sensor_t *sensor, uint16_t sample);
+//uint16_t stabilized_moving_average_add_sample(moving_average_t *avg, uint16_t sample) ;
+uint16_t stabilized_moving_average_add_sample(moving_average_t *avg, ld2410_sensor_t *sensor, uint16_t sample) ;
 void moving_average_reset(moving_average_t *avg);
 
 #ifdef __cplusplus
