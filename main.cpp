@@ -25,7 +25,7 @@
 // How often (ms) to poll
 static constexpr TickType_t POLL_PERIOD_MS = 500;
 // Prototype for your action
-void pin_triggered_function(gpio_num_t pin);
+void pin_triggered_function(gpio_num_t pin);    
 using gpio_cb_t = void(*)(gpio_num_t pin);
 // Maximum GPIO number on the S3
 static constexpr int MAX_GPIO = 49;
@@ -67,6 +67,11 @@ static const char *TAG = "WALKING_AID";
   int ALERT_MEDIUM_LIMIT  = 150;
   int ALERT_FAR_LIMIT  = 200;
 
+
+#define CONFIDENCE_INCREMENT   3  // Increased from +5
+#define CONFIDENCE_DECREMENT   1  // Reduced from -2
+#define CONFIDENCE_THRESHOLD  80  // Lowered from 60% (for faster response)
+  
 
 #define HYSTERESIS 15  // cm
   /*
@@ -355,10 +360,10 @@ typedef struct {
 
 static const alert_config_t alert_configs[] = {
     {0,    0,   0,    "Silent",       LedColor::BLACK,  0, 0, 0.0}, // ALERT_SILENT
-    {800,  20,  3000, "Far",         LedColor::GREEN,   1, 500, 0.5}, // ALERT_FAR
-    {1200, 30,  2000, "Medium",      LedColor::YELLOW, 1, 300, 0.5}, // ALERT_MEDIUM
-    {1800, 50,  1500,  "Close",       LedColor::RED,    1, 200, 0.5}, // ALERT_CLOSE
-    {2500, 100, 1000,  "Immediate",   LedColor::WHITE,  1, 100, 0.5}  // ALERT_IMMEDIATE
+    {800,  50,  3000, "Far",         LedColor::GREEN,   1, 500, 0.5}, // ALERT_FAR
+    {1200, 50,  2000, "Medium",      LedColor::YELLOW, 1, 300, 0.5}, // ALERT_MEDIUM
+    {1800, 50,  1000,  "Close",       LedColor::RED,    1, 200, 0.5}, // ALERT_CLOSE
+    {2500, 70, 500,  "Immediate",   LedColor::WHITE,  1, 100, 0.5}  // ALERT_IMMEDIATE
 };
 
 typedef struct {
@@ -421,13 +426,13 @@ void set_beeper_tone(uint32_t frequency_hz, bool enable) {
 
 // Determine alert level based on distance
 alert_level_t get_alert_level(uint16_t distance_cm) {
-    if (distance_cm <= ALERT_IMMEDIATE_LIMIT + HYSTERESIS) {
+    if (distance_cm <= ALERT_IMMEDIATE_LIMIT ) { //+ HYSTERESIS
         return ALERT_IMMEDIATE;
-    } else if (distance_cm <= ALERT_CLOSE_LIMIT + HYSTERESIS) {
+    } else if (distance_cm <= ALERT_CLOSE_LIMIT ) {
         return ALERT_CLOSE;
-    } else if (distance_cm <= ALERT_MEDIUM_LIMIT + HYSTERESIS) {
+    } else if (distance_cm <= ALERT_MEDIUM_LIMIT ) {
         return ALERT_MEDIUM;
-    } else if (distance_cm <= ALERT_FAR_LIMIT + HYSTERESIS) {
+    } else if (distance_cm <= ALERT_FAR_LIMIT ) {
         return ALERT_FAR;
     } else {
         return ALERT_SILENT;
@@ -571,10 +576,10 @@ config->distance_resolution =  DISTANCE_RESOLUTION_0_2; //DISTANCE_RESOLUTION_0_
 
 ld2410_set_max_distances (8, 8);
 //max_moving_gate, max_stationary_gate
-ALERT_IMMEDIATE_LIMIT = 60;
-ALERT_CLOSE_LIMIT  = 160;
-ALERT_MEDIUM_LIMIT  = 250;
-ALERT_FAR_LIMIT  = 300;
+ALERT_IMMEDIATE_LIMIT = 40;
+ALERT_CLOSE_LIMIT  = 60;
+ALERT_MEDIUM_LIMIT  = 150;
+ALERT_FAR_LIMIT  = 300; 
 
     // Balanced sensitivity for normal use
     for (int gate = 0; gate < 3; gate++) {
@@ -748,27 +753,34 @@ void test_multiple_baud_rates(void) {
     uart_flush(LD2410_UART_NUM);
 }
 
+// Static variable maintains state between calls
+static uint8_t target_confidence = 0;
 
-void process_sample(ld2410_sensor_t* sensor) {
+void process_sample(ld2410_sensor_t *sensor) {
+    // 1. More tolerant validation
+    bool is_valid = (sensor->target_data.target_state != LD2410_TARGET_NONE) && 
+                   (MAX(sensor->target_data.moving_target_energy,
+                       sensor->target_data.stationary_target_energy) > 10); // Lowered from 15%
 
-    ESP_LOGD(TAG, "Validation: Raw=%dcm → Valid=%s → Avg=%dcm", 
-        sensor->target_data.raw_detection_distance,
-        (sensor->target_data.target_state != LD2410_TARGET_NONE) ? "YES" : "NO",
-        sensor->detection_distance_avg.average);
+    // 2. Smoother confidence update
+    sensor->target_confidence = CLAMP(
+        sensor->target_confidence + (is_valid ? CONFIDENCE_INCREMENT : -CONFIDENCE_DECREMENT),
+        0,
+        100
+    );
 
-        
-  // Skip invalid data
-  if(sensor->target_data.raw_detection_distance > 600) return;
-  
-  // Apply temporal filter
-  static uint16_t last_valid_dist = 0;
-  if(abs(sensor->target_data.raw_detection_distance - last_valid_dist) > 100) {
-    ESP_LOGI(TAG, "Implausible jump: %d->%d", last_valid_dist, sensor->target_data.raw_detection_distance);
-    return;
-  }
-  last_valid_dist = sensor->target_data.raw_detection_distance;
+    // 3. New: Minimum confidence for recent valid readings
+    static uint8_t valid_streak = 0;
+    if (is_valid) {
+        valid_streak = MIN(valid_streak + 1, 5);
+        sensor->target_confidence = MAX(sensor->target_confidence, valid_streak * 10);
+    } else {
+        valid_streak = 0;
+    }
+
+    // 4. Confirm target with lower threshold
+    sensor->target_confirmed = (sensor->target_confidence >= CONFIDENCE_THRESHOLD);
 }
-
 
 void sensor_task(void *pvParameters) {
     ld2410_sensor_t sensor = {0};
@@ -801,9 +813,9 @@ void sensor_task(void *pvParameters) {
     vTaskDelay(pdMS_TO_TICKS(3000));  // Longer wait
     
     // Test current baud rate first
-    ESP_LOGI(TAG, "Testing initial sensor communication...");
-    uint8_t initial_buffer[256];
-    int initial_length = uart_read_bytes(LD2410_UART_NUM, initial_buffer, sizeof(initial_buffer), 1000 / portTICK_PERIOD_MS);
+        ESP_LOGI(TAG, "Testing initial sensor communication...");
+        uint8_t initial_buffer[256];
+        int initial_length = uart_read_bytes(LD2410_UART_NUM, initial_buffer, sizeof(initial_buffer), 1000 / portTICK_PERIOD_MS);
     
     if (initial_length > 0) {
         ESP_LOGI(TAG, "Initial data (%d bytes):", initial_length);
@@ -822,11 +834,15 @@ void sensor_task(void *pvParameters) {
         
         if (!valid_frames) {
             ESP_LOGW(TAG, "❌ Invalid frame format detected, testing baud rates...");
+            rgb_led_blink(LedColor::BLUE, 1, 100, 255);
+            vTaskDelay(pdMS_TO_TICKS(1000));
             test_multiple_baud_rates();
         }
     } else {
         ESP_LOGW(TAG, "❌ No initial data, testing baud rates...");
-       test_multiple_baud_rates();
+            rgb_led_blink(LedColor::BLUE, 2, 100, 255);
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            test_multiple_baud_rates();
     }
     
     // Try basic sensor commands to get it into proper mode
@@ -849,9 +865,13 @@ void sensor_task(void *pvParameters) {
     config.max_move_distance_gate = 6;  // Reduce range for better focus
     config.move_thresholds[0] = 60;     // Higher sensitivity near sensor
 
- ret = ld2410_apply_config_safely(&config);
+
+ 
+
+    ret = ld2410_apply_config_safely(&config);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "⚠️ Configuration may have failed, continuing with defaults");
+        rgb_led_blink(LedColor::BLUE, 3, 100, 255);
     }
     
 
@@ -873,12 +893,27 @@ void sensor_task(void *pvParameters) {
             if (final_buffer[i] == 0xF4 && final_buffer[i+1] == 0xF3 && 
                 final_buffer[i+2] == 0xF2 && final_buffer[i+3] == 0xF1) {
                 ESP_LOGI(TAG, "✅ Sensor communication restored!");
+                rgb_led_blink(LedColor::GREEN, 3, 100, 255);
+                   // Startup beep sequence
+    for (int i = 0; i < 3; i++) {
+        set_beeper_tone(1000, true);
+        vTaskDelay(pdMS_TO_TICKS(100));
+        set_beeper_tone(0, false);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
                 found_valid = true;
                 break;
             }
         }
         
         if (!found_valid) {
+
+        set_beeper_tone(440, true);
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        set_beeper_tone(0, false);
+
+            rgb_led_blink(LedColor::RED, 3, 100, 255);
             ESP_LOGE(TAG, "❌ Sensor still not communicating properly");
             ESP_LOGE(TAG, "Try:");
             ESP_LOGE(TAG, "1. Power cycle the sensor");
@@ -889,14 +924,7 @@ void sensor_task(void *pvParameters) {
     
     ESP_LOGI(TAG, "🚀 Starting walking aid main loop...");
     
-    // Startup beep sequence
-    for (int i = 0; i < 3; i++) {
-        set_beeper_tone(1000, true);
-        vTaskDelay(pdMS_TO_TICKS(100));
-        set_beeper_tone(0, false);
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    
+     
     while (1) {
         uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
         
@@ -912,9 +940,10 @@ void sensor_task(void *pvParameters) {
                 process_sample(&sensor); // new
  //               ESP_LOGI(TAG,"ld2410_read_data OK");
 
+//ESP_LOGI(TAG, "sensor.target_data.detection_distance: %d" , sensor.target_data.detection_distance);
 
                 // Sensor data processing (same as before)
-                uint16_t primary_distance = sensor.target_data.detection_distance;
+                uint16_t primary_distance = sensor.target_data.raw_detection_distance;
                 const char* obstacle_type = "None";
                 
                 if (sensor.target_data.target_state == 1) {
@@ -928,11 +957,29 @@ void sensor_task(void *pvParameters) {
                                      sensor.target_data.moving_target_distance : sensor.target_data.stationary_target_distance;
                     obstacle_type = "Both";
                 }
-                
+          
+                alert_level_t alert_level = ALERT_FAR;
+
          //       alert_level_t alert_level = get_alert_level(primary_distance);
-                alert_level_t alert_level = get_alert_level(sensor.stationary_distance_avg.average);
+         if (sensor.target_confirmed) {
+
+            alert_level_t alert_level = get_alert_level(sensor.detection_distance_avg.average);
+
+            if ( sensor.target_data.stationary_target_energy > CONFIDENCE_THRESHOLD && sensor.target_data.moving_target_energy < CONFIDENCE_THRESHOLD ){
+ //               ESP_LOGD(TAG, "get_alert_level using stationary_distance_avg %d", sensor.stationary_distance_avg.average);
+                 alert_level_t alert_level = get_alert_level(sensor.stationary_distance_avg.average);
+            }
+                        if ( sensor.target_data.moving_target_energy > CONFIDENCE_THRESHOLD){
+//                           ESP_LOGD(TAG, "get_alert_level using moving_distance_avg %d", sensor.moving_distance_avg.average);
+                 alert_level_t alert_level = get_alert_level(sensor.moving_distance_avg.average);
+            }
+            
+
+         //       alert_level_t alert_level = get_alert_level(sensor.stationary_distance_avg.average);
                 update_beeper_alerts(alert_level, &sensor);
-                
+         }
+
+
                 const char* alert_emoji = "🟢";
                 const char* alert_name = "CLEAR";
                 switch (alert_level) {
@@ -956,15 +1003,17 @@ ESP_LOGI(TAG, "🚨 ALERT: %s (Distance: %3dcm → Avg: %3dcm ±%dcm)",
            uart_debug_counter++;
 
                 if (uart_debug_counter >= 20) {
-                ESP_LOGI(TAG, "Mov: %d cm %d%% | Still: %d cm %d%% | det: %d cm, Pres: %s | st avg: %d | mov avg: %d | avg count %d", 
+                ESP_LOGI(TAG, "Mov: %d cm %d%% | Still: %d cm %d%% | det: %d cm, Pres: %s | st avg: %d | mov avg: %d | det avg: %d | avg count %d", 
                          sensor.target_data.moving_target_distance, 
                          sensor.target_data.moving_target_energy,
                          sensor.target_data.stationary_target_distance, 
                          sensor.target_data.stationary_target_energy,
-                         sensor.target_data.detection_distance,
+                         sensor.target_data.raw_detection_distance,
                          sensor.presence_detected ? "HIGH" : "LOW",
                          sensor.stationary_distance_avg.average,
+                         
                          sensor.moving_distance_avg.average,
+                         sensor.detection_distance_avg.average,
                       //   sensor.stationary_distance_avg.is_full ? "FULL" : "No",
                          sensor.stationary_distance_avg.count
                 );
@@ -972,9 +1021,13 @@ ESP_LOGI(TAG, "🚨 ALERT: %s (Distance: %3dcm → Avg: %3dcm ±%dcm)",
             }
 
             } else if (ret == ESP_ERR_NOT_FOUND) {
+                
                 ESP_LOGD(TAG, "No sensor data parsed");
+                rgb_led_blink(LedColor::RED, 1, 50, 255);
+                vTaskDelay(pdMS_TO_TICKS(1000));
             } else if (ret != ESP_ERR_TIMEOUT) {
                 ESP_LOGW(TAG, "Sensor read error: %s", esp_err_to_name(ret));
+                rgb_led_blink(LedColor::RED, 2, 50, 255);
             }
             
             if (sensor.presence_pin_enabled) {
@@ -998,7 +1051,7 @@ ESP_LOGI(TAG, "🚨 ALERT: %s (Distance: %3dcm → Avg: %3dcm ±%dcm)",
             uart_debug_counter = 0;
         }
       */  
-        vTaskDelay(pdMS_TO_TICKS(10));
+      //  vTaskDelay(pdMS_TO_TICKS(10));
     }
     
    ld2410_cleanup_moving_averages(&sensor);
@@ -1042,8 +1095,6 @@ void pin_triggered_function(gpio_num_t pin)
  // ld2410_disable_config_mode();
     vTaskDelay(pdMS_TO_TICKS(1000));
     
-
-
     }
     
     ESP_LOGI("ACTION", "Handling event from pin %d", pin);
@@ -1073,15 +1124,17 @@ extern "C" void app_main(void) {
     esp_err_t ret = init_piezo_beeper();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize piezo beeper");
+       //   rgb_led_blink(LedColor::RED, 1, 50, 255);
         return;
     }
-    rgb_led_blink(LedColor::GREEN, 2, 50, 255);
+  
 
     // Initialize LD2410 sensor
    // ESP_LOGI(TAG, "Initializing LD2410 sensor on TX:%d, RX:%d", LD2410_TX_PIN, LD2410_RX_PIN);
     ret = ld2410_init(LD2410_TX_PIN, LD2410_RX_PIN);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to initialize LD2410 sensor: %s", esp_err_to_name(ret));
+          rgb_led_blink(LedColor::RED, 1, 50, 255);
         return;
     }
     
@@ -1092,6 +1145,7 @@ extern "C" void app_main(void) {
     BaseType_t task_created = xTaskCreate(sensor_task, "sensor_task", 8192, NULL, 5, NULL);
     if (task_created != pdPASS) {
         ESP_LOGE(TAG, "Failed to create sensor task");
+          rgb_led_blink(LedColor::RED, 2, 50, 255);
         return;
     }
     
