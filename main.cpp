@@ -919,6 +919,14 @@ void sensor_task(void *pvParameters) {
             ESP_LOGE(TAG, "1. Power cycle the sensor");
             ESP_LOGE(TAG, "2. Check wiring connections");
             ESP_LOGE(TAG, "3. Verify sensor power supply");
+
+// Try enable/disable config mode to reset sensor
+    ld2410_enable_config_mode();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    ld2410_disable_config_mode();
+    vTaskDelay(pdMS_TO_TICKS(1000));
+  
+
         }
     }
     
