@@ -164,7 +164,9 @@ typedef struct {
     bool stop_current;  // Emergency stop flag
 } audio_command_t;
 
-static QueueHandle_t audio_queue = NULL;
+
+QueueHandle_t audio_queue = NULL;
+static constexpr uint32_t SAMPLE_RATE = 16000; // Reduced from 48kHz for better ESP32 performance
 
 // ----------------------------------------------------------------
 // --- NEW: Single LED State Struct and Mode Enum ---
@@ -260,6 +262,8 @@ static TaskHandle_t xHandle_vl53l5cx;
 static TaskHandle_t xHandle_vibrator;
 static TaskHandle_t xHandle_blink;
 static TaskHandle_t xHandle_GPS;
+
+static TaskHandle_t xHandle_Audio;
 
 #define movement_timeout_msec 50
 static int last_movement = 0;
@@ -910,8 +914,25 @@ TaskHandle_t xHandle_blink = NULL;
 static std::map<alert_level_t, std::vector<int8_t>> waveform_cache;
 static SemaphoreHandle_t cache_mutex = NULL;
 
-
-static std::vector<int8_t> generateWaveform(alert_level_t level) {
+void generateWaveform(alert_level_t level, int8_t* buffer, size_t size) {
+    const float freq = 800.0f; // Base frequency
+    const float step = 6.28318530718f * freq / SAMPLE_RATE;
+    
+    for (size_t i = 0; i < size; i++) {
+        switch (level) {
+            case ALERT_IMMEDIATE:
+                buffer[i] = 100 * (i % 50 < 25 ? 1 : -1); // Square wave
+                break;
+            case ALERT_CLOSE:
+                buffer[i] = 80 * sinf(step * i); // Sine wave
+                break;
+            // Add other alert levels...
+            default:
+                buffer[i] = 0;
+        }
+    }
+}
+static std::vector<int8_t> generateWaveformX(alert_level_t level) {
     std::vector<int8_t> buffer;
     const uint32_t sample_rate = 48000;
      uint32_t base_freq;
@@ -1024,6 +1045,7 @@ static std::vector<int8_t> generateWaveform(alert_level_t level) {
     return buffer;
 }
 
+/*
 // Pre-generate all waveforms and cache them
 static void initWaveformCache() {
 
@@ -1041,6 +1063,7 @@ static void initWaveformCache() {
     };
     xSemaphoreGive(cache_mutex);
 }
+*/
 
 
 static void audioTask(void *pvParameters) {
@@ -1058,69 +1081,75 @@ static void audioTask(void *pvParameters) {
         .timer_num = TIMER_0,
 #endif
         .duty_resolution = LEDC_TIMER_8_BIT,
-        .ringbuf_len = 1024 * 8
+        .ringbuf_len = 1024 * 4
         };
 
 
+    ESP_ERROR_CHECK(pwm_audio_init(&pac));
+    ESP_ERROR_CHECK(pwm_audio_set_param(SAMPLE_RATE, LEDC_TIMER_8_BIT, 2));
+    pwm_audio_start();
 
-    pwm_audio_init(&pac);
-    pwm_audio_set_param(48000, LEDC_TIMER_8_BIT, 2);
-  ESP_LOGI(TAG, "audioTask pwm_audio_init done ");
-    audio_command_t cmd;
-    uint32_t current_play_pos = 0;
     alert_level_t current_level = ALERT_SILENT;
-    
-    while (1) {
-        // Check for new commands with 10ms timeout
-        if (xQueueReceive(audio_queue, &cmd, pdMS_TO_TICKS(10)) == pdTRUE) {
+    uint32_t samples_played = 0;
+    const uint32_t duration_samples = SAMPLE_RATE * 0.5; // 500ms default
 
-            ESP_LOGI(TAG, "xQueueReceive received");
+ //   pwm_audio_init(&pac);
+ //   pwm_audio_set_param(48000, LEDC_TIMER_8_BIT, 2);
+  ESP_LOGI(TAG, "audioTask pwm_audio_init done ");
 
-            if (cmd.stop_current) {
+     while (1) {
+        // Check for new commands (non-blocking)
+        if (xQueueReceive(audio_queue, &current_level, 0) == pdTRUE) {
+            samples_played = 0;
+            if (current_level == ALERT_SILENT) {
                 pwm_audio_stop();
-                current_level = ALERT_SILENT;
                 continue;
             }
-            
-            current_level = cmd.level;
-            current_play_pos = 0;
+            pwm_audio_start();
         }
-        
-        // Play current waveform if active
-        if (current_level != ALERT_SILENT) {
-            xSemaphoreTake(cache_mutex, portMAX_DELAY);
-            auto& buffer = waveform_cache[current_level];
+
+        // Generate and play audio if active
+        if (current_level != ALERT_SILENT && samples_played < duration_samples) {
+            int8_t samples[256];  // Small buffer for real-time generation
+            size_t bytes_written;
             
-            xSemaphoreGive(cache_mutex);
+            // Generate appropriate waveform
+            generateWaveform(current_level, samples, sizeof(samples));
             
-            size_t bytes_written = 0;
-            uint32_t remaining = buffer.size() - current_play_pos;
-            uint32_t to_write = (remaining < 256) ? remaining : 256;
+            // Write to audio interface
+            pwm_audio_write(reinterpret_cast<uint8_t*>(samples), 
+                          sizeof(samples), &bytes_written, portMAX_DELAY);
             
-            // Cast the int8_t buffer to uint8_t for the audio write function
-            pwm_audio_write(reinterpret_cast<uint8_t*>(&buffer[current_play_pos]), 
-                          to_write, &bytes_written, 0);
-           // ESP_LOGI(TAG, "xSemaphore Taken, waveform_cache retrieved");
-            current_play_pos += bytes_written;
-            
-            // Loop or stop based on duration
-            if (current_play_pos >= buffer.size() || 
-                current_play_pos >= (48000 * cmd.duration_ms / 1000 * 2)) {
-                if (cmd.duration_ms == 0) { // Continuous
-                    current_play_pos = 0;
-                } else {
-                    current_level = ALERT_SILENT;
-                }
-            }
+            samples_played += bytes_written / 2;
         } else {
-            vTaskDelay(pdMS_TO_TICKS(1)); // Minimal delay when idle
+            vTaskDelay(pdMS_TO_TICKS(10));
         }
     }
 }
 
 
-void initAudioSystem() {
-    initWaveformCache();
+void initAudio() {
+    // Create audio command queue
+    audio_queue = xQueueCreate(5, sizeof(alert_level_t));
+    
+    // Create high-priority audio task
+    xTaskCreatePinnedToCore(
+        audioTask,
+        "audio",
+        4096,  // Stack size
+        NULL,
+        5,     // Higher priority (5)
+        &xHandle_Audio,       /* Task handle. */
+        0      // Core 0
+    );
+
+
+
+}
+
+
+void initAudioSystemX() {
+  //  initWaveformCache();
     audio_queue = xQueueCreate(10, sizeof(audio_command_t));
     
     xTaskCreatePinnedToCore(
@@ -1291,7 +1320,7 @@ bool playAudio(uint32_t duration_ms, uint32_t frequency_hz) {
         .timer_num = TIMER_0,
 #endif
         .duty_resolution = LEDC_TIMER_8_BIT,
-        .ringbuf_len = 1024 * 8
+        .ringbuf_len = 1024 * 4
     };
 
     // Initialize audio system
@@ -1777,7 +1806,7 @@ if ( abs(received_data.pitch -  last_pitch ) > acc_Move_limit || abs(received_da
  ESP_LOGI("PROCESSOR_TASK", "Device is moved %.1f  %.1f current_time: %d last_movement: %d", abs(received_data.pitch -  last_pitch ), abs(received_data.roll -  last_roll), current_time, last_movement   );
 
 #ifdef useAudio
-update_beeper_alerts(ALERT_MEDIUMFAR, 1);
+//update_beeper_alerts(ALERT_MEDIUMFAR, 1);
 //playAudio(500, 1200);
 //playAudio(500, 1400);
 #endif
@@ -2331,6 +2360,10 @@ if (current_time - last_update_time > alert_update_period ) {
 
  ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
 
+            if (audio_queue) {
+        xQueueSend(audio_queue, &new_level, portMAX_DELAY);
+    }
+
 
 if (direction == 1){
 
@@ -2343,7 +2376,8 @@ if (direction == 1){
              #ifdef useVibrator2
             vibrator_task_init( VIBRATORPIN, 2, 80, 50);
         #endif
-         //   ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
+
+          //   ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
 
             break;
 
@@ -2364,7 +2398,7 @@ if (direction == 1){
             gpio_set_level(BLUE_PIN_1, 1);  
             gpio_set_level(GREEN_PIN_1, 0); 
 
-            playWarningToneAsync(new_level, 600);
+//            playWarningToneAsync(new_level, 600);
             break;
 
          case ALERT_MEDIUMFAR:
@@ -2375,7 +2409,7 @@ if (direction == 1){
             gpio_set_level(BLUE_PIN_1, 1);  
             gpio_set_level(GREEN_PIN_1, 1); 
 
-            playWarningToneAsync(new_level, 500);
+ //           playWarningToneAsync(new_level, 500);
             break;
             
        case ALERT_FAR:
@@ -3928,9 +3962,9 @@ gpio_set_direction(BLUE_PIN_1, GPIO_MODE_OUTPUT);
 gpio_set_direction(GREEN_PIN_1, GPIO_MODE_OUTPUT);
 
 #ifdef useAudio
-initAudioSystem(); 
+initAudio(); 
 
-playWarningToneAsync(ALERT_IMMEDIATE, 500);
+//playWarningToneAsync(ALERT_IMMEDIATE, 500);
 #endif
 
     uint32_t last_sensor_read = 0;
