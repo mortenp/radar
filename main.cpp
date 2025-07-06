@@ -1549,7 +1549,7 @@ static void vibrator_task_init( gpio_num_t pin, uint8_t times, uint32_t length_m
 
  //   if (!xHandle_vibrator){
 
-//ESP_LOGI("VIBRA", "vibrator_task_init %d %d %d", pin,times, interval_ms2 );
+ESP_LOGI("VIBRA", "vibrator_task_init %d %d %d", pin,times, interval_ms2 );
 
     xTaskCreate(vibrator_task, "vibrator_task", 1024, NULL, 2, &xHandle_vibrator);
  //   }
@@ -2289,10 +2289,15 @@ void uart_task(void *pvParameters) {
 }
 #endif
 
+static uint32_t last_update_time = xTaskGetTickCount();
+static int alert_update_period = 50;
+
 
 // Updated alert handler using async playback
 void update_beeper_alerts(alert_level_t new_level, int direction) {
     // Visual alerts (unchanged)
+
+//uint32_t last_update_time = xTaskGetTickCount();
 
 
    // Check if alert level changed
@@ -2316,18 +2321,30 @@ void update_beeper_alerts(alert_level_t new_level, int direction) {
     } 
     
 
+uint32_t current_time = xTaskGetTickCount();
 
- ESP_LOGI(TAG, "new_level %d", new_level);
+
+if (current_time - last_update_time > alert_update_period ) {
+ last_update_time = current_time;
+
+ ESP_LOGI(TAG, "update perios current_time:%d last_update_time:%d", current_time, last_update_time);
+
+ ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
 
 
 if (direction == 1){
 
-resetPins();
+//resetPins();
 
 
     switch (new_level) {
         case ALERT_IMMEDIATE:
             blink_task_init(RED_PIN_1, 5, 300);
+             #ifdef useVibrator2
+            vibrator_task_init( VIBRATORPIN, 2, 80, 50);
+        #endif
+         //   ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
+
             break;
 
         case ALERT_CLOSE:
@@ -2363,17 +2380,28 @@ resetPins();
             
        case ALERT_FAR:
        #ifdef useVibrator2
-        vibrator_task_init( VIBRATORPIN, 1, 40, 200);
+      //  vibrator_task_init( VIBRATORPIN, 1, 40, 200);
         #endif
 // vTaskDelay(pdMS_TO_TICKS(50));
         gpio_set_level(RED_PIN_1, 0); 
         gpio_set_level(BLUE_PIN_1, 0);  
         gpio_set_level(GREEN_PIN_1, 1); 
-            playWarningToneAsync(new_level, 400);
+        //    playWarningToneAsync(new_level, 400);
+            break;
+
+       case ALERT_VERYFAR:
+       #ifdef useVibrator2
+      //  vibrator_task_init( VIBRATORPIN, 1, 40, 200);
+        #endif
+// vTaskDelay(pdMS_TO_TICKS(50));
+        gpio_set_level(RED_PIN_1, 0); 
+        gpio_set_level(BLUE_PIN_1, 0);  
+        gpio_set_level(GREEN_PIN_1, 0); 
+          //  playWarningToneAsync(new_level, 400);
             break;
 
         default:
-        playWarningToneAsync(ALERT_SILENT, 0);
+       // playWarningToneAsync(ALERT_SILENT, 0);
         gpio_set_level(RED_PIN_1, 0); 
         gpio_set_level(BLUE_PIN_1, 0);  
         gpio_set_level(GREEN_PIN_1, 0); 
@@ -2468,8 +2496,9 @@ vibrator_task_init( VIBRATORPIN2, 3, 200, 50);
 //vTaskDelay(pdMS_TO_TICKS(200));
 } // end sensor2
 
-} // new level check
+} // update time 
 
+} // new level check
 
 }
 
