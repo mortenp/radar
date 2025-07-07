@@ -29,6 +29,7 @@
  #include "led_strip.h"
  #include "led_strip_rmt.h"
  #include "math.h"
+ #include <algorithm>
 
  #include "driver/gpio.h"
 
@@ -65,6 +66,7 @@
 #include "pwm_audio.h"
 #include <map>
 
+//import std;
 
 //static bool useAcc = 0;
 #define  useAccelerometer 
@@ -203,6 +205,13 @@ static audio_state_t audio_state = {
 static constexpr uint32_t SAMPLE_RATE = 16000;  // Optimal for ESP32 audio
 static constexpr size_t RINGBUF_SIZE = 1024 * 4; // 4KB ring buffer
 static constexpr uint32_t DEFAULT_DURATION_MS = 500;
+
+static volatile bool audio_active = false;
+static alert_level_t current_level = ALERT_SILENT;
+
+//static constexpr uint32_t AUDIO_SAMPLE_RATE = 16000; // 16kHz
+//static constexpr uint32_t DURATION_MS = 500; // 500ms per tone
+//static constexpr uint32_t SAMPLES_PER_BUFFER = 128; // Optimal chunk size
 
 // Audio System State
 static QueueHandle_t audioQueue = NULL;
@@ -958,15 +967,23 @@ TaskHandle_t xHandle_blink = NULL;
 
 #ifdef useAudio
 
+
+
 void generateWaveform(alert_level_t level, int8_t* buffer, size_t size) {
     static uint32_t phase_counter = 0;
     const uint32_t sample_rate = 16000;
     
     // Common parameters
-    float amplitude = 0;
-    float freq = 800.0f; // Base frequency
+    //float amplitude = 0;
+    //float freq = 800.0f; // Base frequency
     float phase_step = 0;
     
+    const float base_freq = 800.0f;
+    
+    float freq = base_freq;
+    float amplitude = 127.0f;
+    
+
     // Configure waveform based on alert level
     switch(level) {
         case ALERT_SILENT:
@@ -1084,151 +1101,193 @@ void generateWaveform(alert_level_t level, int8_t* buffer, size_t size) {
 ///////// audio tasks without caching ///////////////
 
 // Global state tracking
+//typedef struct {
+ //   volatile bool is_playing;
+ //   volatile bool is_initialized;
+ //       alert_level_t current_level;
+ //   uint32_t samples_remaining;
+ //   bool active;
+//} audio_state_t;
+
 typedef struct {
-    volatile bool is_playing;
-    volatile bool is_initialized;
+    // Control Flags
+    volatile bool is_initialized;    // Hardware initialized
+    volatile bool is_playing;        // Actively playing audio
+    volatile bool stop_requested;    // Emergency stop flag
+    
+    // Playback State
+    alert_level_t current_level;
+    uint32_t total_samples;         // Total samples to play
+    uint32_t played_samples;        // Samples already played
+    
+    // Timing
+    uint32_t duration_ms;           // Current duration
+    TickType_t last_wdt_reset;      // Last watchdog reset time
 } audio_state_t;
-static audio_state_t audio_state = {false, false};
+
+static audio_state_t audio_state = {
+    .is_initialized = false,
+    .is_playing = false,
+    .stop_requested = false,
+    .current_level = ALERT_SILENT,
+    .total_samples = 0,
+    .played_samples = 0,
+    .duration_ms = 0,
+    .last_wdt_reset = 0
+};
+
+//static audio_state_t audio_state = {false, false};
+
+uint32_t getAlertDuration(alert_level_t level) {
+    switch(level) {
+        case ALERT_VERYFAR:  return 300;  // 300ms
+        case ALERT_FAR:      return 400;  // 400ms  
+        case ALERT_MEDIUM:   return DEFAULT_DURATION_MS; // 500ms
+        case ALERT_CLOSE:    return 750;  // 750ms
+        case ALERT_IMMEDIATE:return 1000; // 1s
+        default: return DEFAULT_DURATION_MS;
+    }
+}
+
+
 
 void audioTask(void *pvParameter) {
-    
-//esp_task_wdt_reset();
-ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
-
+    // 1. One-time hardware init
+  
     pwm_audio_config_t pac = {
         .gpio_num_left = LEFT_CHANNEL_GPIO,
         .gpio_num_right = RIGHT_CHANNEL_GPIO,
-        .ledc_channel_left = LEDC_CHANNEL_0,
+        .ledc_channel_left = LEDC_CHANNEL_0,   
         .ledc_channel_right = LEDC_CHANNEL_1,
         .ledc_timer_sel = LEDC_TIMER_0,
         .duty_resolution = LEDC_TIMER_8_BIT,
-        .ringbuf_len = RINGBUF_SIZE
+        .ringbuf_len = 1024 * 4
     };
 
-      esp_err_t ret = pwm_audio_init(&pac);
 
-    if (ret != ESP_OK) {
-        ESP_LOGE("AUDIO", "Init failed: 0x%x", ret);
-        vTaskDelete(NULL);
-        return;
-    } else {
-        ESP_LOGI("AUDIO", "Init ok: 0x%x", ret);
-    }
+    ESP_ERROR_CHECK(pwm_audio_init(&pac));
+    ESP_ERROR_CHECK(pwm_audio_set_param(16000, LEDC_TIMER_8_BIT, 2));
 
-    ret = pwm_audio_set_param(16000, LEDC_TIMER_8_BIT, 2);
-    if (ret != ESP_OK) {
-        ESP_LOGE("AUDIO", "Param failed: 0x%x", ret);
-        pwm_audio_deinit();
-        vTaskDelete(NULL);
-        return;
-    } else {
-        ESP_LOGI("AUDIO", "pwm_audio_set_param ok: 0x%x", ret);
-    }
-
-    audio_state.is_initialized = true;
-    ESP_LOGI("AUDIO", "Hardware initialized");
-
-        while(1) {
-        esp_task_wdt_reset();  // Critical for watchdog
-        
-        alert_level_t level;
-        if (xQueueReceive(audioQueue, &level, pdMS_TO_TICKS(10))) {
-
-if ( xSemaphoreTake(audio_mutex, portMAX_DELAY)){
-
-ESP_LOGI("AUDIO", "audio_mutex taken");
-
-               if (level == ALERT_SILENT) {
-                if (audio_state.is_playing) {
-                    ESP_LOGI("AUDIO", "Audio is playing, level ALERT_SILENT");
-                    pwm_audio_stop();
-                    audio_state.is_playing = false;
-                    ESP_LOGI("AUDIO", "Audio stopped, level ALERT_SILENT");
-                }
+    // 2. Main processing loop
+    while(1) {
+        // Check for new commands
+        alert_level_t new_level;
+        if(xQueueReceive(audioQueue, &new_level, pdMS_TO_TICKS(10))) {
+            if(new_level == ALERT_SILENT) {
+                pwm_audio_stop();
+                audio_active = false;
             } else {
-                if (!audio_state.is_playing) {
-
-                    ESP_LOGI("AUDIO", "Audio not playing, level not ALERT_SILENT");
-                    vTaskDelay(pdMS_TO_TICKS(20)); // Allow hardware to settle
-                    ret = pwm_audio_start();
-                    if (ret == ESP_OK) {
-                        audio_state.is_playing = true;
-                        ESP_LOGI("AUDIO", "Audio started, level not ALERT_SILENT");
-                    } else {
-                        ESP_LOGE("AUDIO", "Start failed level not ALERT_SILENT: 0x%x", ret);
-                    }
-                } else {
-                    ESP_LOGI("AUDIO", "Audio is playing, level not ALERT_SILENT");
-                }
-                
-                // Generate and play tone
-                int8_t samples[128];
-                generateWaveform(level, samples, sizeof(samples));
-                
-                size_t written;
-                ret = pwm_audio_write(reinterpret_cast<uint8_t*>(samples), 
-                                    sizeof(samples), &written, pdMS_TO_TICKS(50));
-                if (ret != ESP_OK) {
-                    ESP_LOGE("AUDIO", "Write failed: 0x%x", ret);
-                    pwm_audio_stop();
-                    audio_state.is_playing = false;
-                }
+                current_level = new_level;
+                audio_active = true;
+                pwm_audio_start();
             }
-             xSemaphoreGive(audio_mutex);
-             ESP_LOGI("AUDIO", "audio_mutex given");
-        } else{
-            ESP_LOGI("AUDIO", "could not get audio_mutex ");
         }
-     //   esp_task_wdt_reset();
-    }
-        // Yield if no messages
-        if (uxQueueMessagesWaiting(audioQueue) == 0) {
+
+        // Generate and play audio if active
+        if(audio_active) {
+            int8_t samples[128];
+
+            ESP_LOGI("AUDIO", "generateWaveform( %d, %d, %d)", current_level,samples, sizeof(samples) );
+
+            generateWaveform(current_level, samples, sizeof(samples));
+            
+            size_t written;
+            esp_err_t err = pwm_audio_write(
+                reinterpret_cast<uint8_t*>(samples),
+                sizeof(samples),
+                &written,
+                pdMS_TO_TICKS(50)
+            );
+            
+            if(err != ESP_OK) {
+                ESP_LOGE("AUDIO", "Write failed: 0x%x", err);
+                pwm_audio_stop();
+                audio_active = false;
+            }
+        } else {
             vTaskDelay(pdMS_TO_TICKS(1));
         }
-         vTaskDelay(pdMS_TO_TICKS(1)); // Yield to other tasks
-    } // while 1
+    }
 }
 
-
+// Initialization
 void initAudioSystem() {
-    // Create queue before task
-    audio_mutex = xSemaphoreCreateMutex();
     audioQueue = xQueueCreate(5, sizeof(alert_level_t));
-    
-    /*
-    // Create task with watchdog-friendly parameters
-    xTaskCreate(
-        audioTask,
-        "AudioPlayer",
-        4096,  // Stack size
-        NULL,
-        4,     // Priority (higher than idle)
-        &audioTaskHandle
-    );
-    */
-
-    xTaskCreatePinnedToCore(
-                    audioTask,   /* Function to implement the task */
-                    "AudioPlayer", /* Name of the task */
-                    4096,      /* Stack size in words */
-                    NULL,       /* Task input parameter */
-                    4,          /* Priority of the task */
-                    &audioTaskHandle,       /* Task handle. */
-                    1);  /* Core where the task should run */
- 
-    // Configure watchdog
-     // Initialize watchdog
-     /*
-     esp_task_wdt_add(NULL);
-
-    esp_task_wdt_config_t wdt_config = {
-        .timeout_ms = 5000,
-        .idle_core_mask = (1 << portNUM_PROCESSORS) - 1,
-        .trigger_panic = true
-    };
-   // esp_task_wdt_init(&wdt_config);
-    */
+    xTaskCreate(audioTask, "AudioPlayer", 4096, NULL, 3, NULL);
 }
+
+
+/*
+void audioTask(void *pvParameter) {
+    // Register with watchdog
+    esp_task_wdt_add(NULL);
+    
+    while (1) {
+        // 1. Handle emergency stop
+        if (audio_state.stop_requested) {
+            pwm_audio_stop();
+            audio_state.is_playing = false;
+            audio_state.stop_requested = false;
+            continue;
+        }
+        
+        // 2. Process incoming commands
+        alert_level_t new_level;
+        if (xQueueReceive(audioQueue, &new_level, 0) == pdTRUE) {
+            if (new_level == ALERT_SILENT) {
+                audio_state.stop_requested = true;
+            } else if (audio_state.is_initialized) {
+                audio_state.current_level = new_level;
+                audio_state.duration_ms = getAlertDuration(new_level);
+                audio_state.total_samples = (SAMPLE_RATE * audio_state.duration_ms) / 1000;
+                audio_state.played_samples = 0;
+                audio_state.is_playing = true;
+                pwm_audio_start();
+            }
+        }
+        
+        // 3. Handle audio generation
+        if (audio_state.is_playing && audio_state.played_samples < audio_state.total_samples) {
+            int8_t samples[128];
+            size_t remaining = audio_state.total_samples - audio_state.played_samples;
+            //size_t to_generate = MIN(sizeof(samples), remaining);
+            
+            size_t to_generate = std::min(sizeof(samples), (unsigned int) remaining);
+            generateWaveform(audio_state.current_level, samples, to_generate);
+            
+            size_t written;
+            esp_err_t err = pwm_audio_write(
+                reinterpret_cast<uint8_t*>(samples),
+                to_generate,
+                &written,
+                pdMS_TO_TICKS(10)
+            );
+            
+            if (err == ESP_OK) {
+                audio_state.played_samples += written;
+            } else {
+                ESP_LOGE("AUDIO", "Write error: 0x%x", err);
+                audio_state.stop_requested = true;
+            }
+            
+            // Check for completion
+            if (audio_state.played_samples >= audio_state.total_samples) {
+                audio_state.is_playing = false;
+                pwm_audio_stop();
+            }
+        }
+        
+        // 4. Watchdog maintenance
+        if (xTaskGetTickCount() - audio_state.last_wdt_reset > pdMS_TO_TICKS(1000)) {
+            esp_task_wdt_reset();
+            audio_state.last_wdt_reset = xTaskGetTickCount();
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
+*/
+
 
 void playWarningToneAsync(alert_level_t level, uint32_t duration_ms) {
     if (audioQueue == NULL) return;
@@ -1320,7 +1379,7 @@ bool playAudio(uint32_t duration_ms, uint32_t frequency_hz) {
         data_buffer[i*2 + 1] = static_cast<int8_t>(amplitude * cosf(phase)); // Right
     }
 
-  
+  /*
     // Configure PWM audio
     pwm_audio_config_t pac = {
         
@@ -1344,6 +1403,7 @@ bool playAudio(uint32_t duration_ms, uint32_t frequency_hz) {
     }
     pwm_audio_set_param(sample_rate, static_cast<ledc_timer_bit_t>(8), 2);
     pwm_audio_start();
+*/
 
     // Calculate required iterations for duration
     const uint32_t total_samples = (sample_rate * duration_ms) / 1000;
@@ -2399,13 +2459,16 @@ if (current_time - last_update_time > alert_update_period ) {
 
  ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
 
-  //  if (audio_queue != NULL) {
-  //      xQueueSend(audio_queue, &new_level, portMAX_DELAY);
-  //  }
+ // if (audioQueue != NULL) {
+   //   xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ // }
+
+
 #ifdef useAudio
 
 if (new_level != ALERT_VERYFAR ){
-playWarningToneAsync(new_level, 200);
+   // xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+//playWarningToneAsync(new_level, 200);
 }
 #endif
 /*
@@ -2430,7 +2493,7 @@ if (direction == 1){
              #ifdef useVibrator2
             vibrator_task_init( VIBRATORPIN, 2, 80, 50);
         #endif
-
+ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
           //   ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
 
             break;
@@ -2441,6 +2504,7 @@ if (direction == 1){
         #endif
          //   playWarningToneAsync(new_level, 800);
             blink_task_init(RED_PIN_1, 2, 300); //
+             xQueueSend(audioQueue, &new_level, portMAX_DELAY);
             break;
 
          case ALERT_MEDIUM:
@@ -2451,7 +2515,7 @@ if (direction == 1){
             gpio_set_level(RED_PIN_1, 0); 
             gpio_set_level(BLUE_PIN_1, 1);  
             gpio_set_level(GREEN_PIN_1, 0); 
-
+ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
 //            playWarningToneAsync(new_level, 600);
             break;
 
@@ -2462,7 +2526,7 @@ if (direction == 1){
             gpio_set_level(RED_PIN_1, 0); 
             gpio_set_level(BLUE_PIN_1, 1);  
             gpio_set_level(GREEN_PIN_1, 1); 
-
+ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
  //           playWarningToneAsync(new_level, 500);
             break;
             
@@ -2474,6 +2538,7 @@ if (direction == 1){
         gpio_set_level(RED_PIN_1, 0); 
         gpio_set_level(BLUE_PIN_1, 0);  
         gpio_set_level(GREEN_PIN_1, 1); 
+         xQueueSend(audioQueue, &new_level, portMAX_DELAY);
         //    playWarningToneAsync(new_level, 400);
             break;
 
@@ -4311,7 +4376,7 @@ ESP_LOGI("MAIN", "initAudioSystem done");
    alert_level_t level5 = ALERT_CLOSE;
   if (audioQueue) {
        // xQueueSend(audioQueue, &level5, pdMS_TO_TICKS(10));
-        playWarningToneAsync(level5, 200);
+ //       playWarningToneAsync(level5, 200);
     }
 
  ESP_LOGI("MAIN", "Audio started");
