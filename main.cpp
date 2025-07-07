@@ -161,12 +161,37 @@ typedef struct {
 typedef struct {
     alert_level_t level;
     uint32_t duration_ms;
-    bool stop_current;  // Emergency stop flag
 } audio_command_t;
 
+/*
+// Audio Control Structure
+typedef struct {
+    QueueHandle_t queue;
+    SemaphoreHandle_t mutex;
+    volatile bool active;
+    volatile bool initialized;
+} audio_state_t;
 
-QueueHandle_t audio_queue = NULL;
-static constexpr uint32_t SAMPLE_RATE = 16000; // Reduced from 48kHz for better ESP32 performance
+
+static audio_state_t audio_state = {
+    .queue = NULL,
+    .mutex = NULL,
+    .active = false,
+    .initialized = false
+};
+*/
+// Static allocation for mutex
+//static StaticSemaphore_t xMutexBuffer;
+
+
+static constexpr uint32_t SAMPLE_RATE = 16000;  // Optimal for ESP32 audio
+static constexpr size_t RINGBUF_SIZE = 1024 * 4; // 4KB ring buffer
+static constexpr uint32_t DEFAULT_DURATION_MS = 500;
+
+// Audio System State
+static QueueHandle_t audio_queue = NULL;
+static SemaphoreHandle_t audio_mutex = NULL;
+//static volatile bool audio_active = false;
 
 // ----------------------------------------------------------------
 // --- NEW: Single LED State Struct and Mode Enum ---
@@ -418,7 +443,7 @@ void data_processor_task(void *pvParameters);
 #endif
 
 #ifdef useAudio
-//void audio_task(void *pvParameters);
+void audio_task(void *pvParameters);
 #endif
 
 
@@ -908,66 +933,72 @@ TaskHandle_t xHandle_blink = NULL;
 }
 
 #ifdef useAudio
-//std::map<alert_level_t, std::vector<int8_t>> waveform_cache;
 
-// Waveform cache (persistent storage)
-static std::map<alert_level_t, std::vector<int8_t>> waveform_cache;
-static SemaphoreHandle_t cache_mutex = NULL;
 
-void generateWaveform(alert_level_t level, int8_t* buffer, size_t size) {
-    const float freq = 800.0f; // Base frequency
-    const float step = 6.28318530718f * freq / SAMPLE_RATE;
+
+///////// audio tasks without caching ///////////////
+static void audioTask(void *pvParameter) {
     
-    for (size_t i = 0; i < size; i++) {
-        switch (level) {
-            case ALERT_IMMEDIATE:
-                buffer[i] = 100 * (i % 50 < 25 ? 1 : -1); // Square wave
-                break;
-            case ALERT_CLOSE:
-                buffer[i] = 80 * sinf(step * i); // Sine wave
-                break;
-            // Add other alert levels...
-            default:
-                buffer[i] = 0;
-        }
+
+    pwm_audio_config_t pac = {
+        .gpio_num_left = LEFT_CHANNEL_GPIO,
+        .gpio_num_right = RIGHT_CHANNEL_GPIO,
+        .ledc_channel_left = LEDC_CHANNEL_0,
+        .ledc_channel_right = LEDC_CHANNEL_1,
+        .ledc_timer_sel = LEDC_TIMER_0,
+        .duty_resolution = LEDC_TIMER_8_BIT,
+        .ringbuf_len = RINGBUF_SIZE
+    };
+
+     if (pwm_audio_init(&pac) != ESP_OK) {
+        vTaskDelete(NULL);
+        return;
     }
-}
-static std::vector<int8_t> generateWaveformX(alert_level_t level) {
-    std::vector<int8_t> buffer;
-    const uint32_t sample_rate = 48000;
-     uint32_t base_freq;
-  // Generate different waveforms based on alert level
+    pwm_audio_set_param(SAMPLE_RATE, LEDC_TIMER_8_BIT, 2);
 
- ESP_LOGI(TAG, "generateWaveform called");
+    audio_command_t cmd;
+    
+    while (1) {
 
-    switch (level) {
+       // if (xQueueReceive(mpu_data_queue, &received_data, portMAX_DELAY) == pdPASS)
+        if (xQueueReceive(audio_queue, &cmd, portMAX_DELAY) == pdTRUE) {
+            if (cmd.level == ALERT_SILENT) {
+                pwm_audio_stop();
+                continue;
+            }
+            
+            // Generate waveform based on cmd.level and cmd.duration_ms
+                const uint32_t sample_rate = 48000;
+    std::vector<int8_t> data_buffer;
+    uint32_t base_freq;
+
+    // Generate different waveforms based on alert level
+    switch (cmd.level) {
         case ALERT_VERYFAR: {
-             ESP_LOGI(TAG, "generateWaveform ALERT_VERYFAR");
             // Gentle 600Hz sine wave with slow pulsation
             base_freq = 600;
             uint32_t size = sample_rate / 2; // 0.5s buffer for pulsation
-            buffer.resize(size * 2);
+            data_buffer.resize(size * 2);
             for (uint32_t i = 0; i < size; i++) {
                 float phase = 6.283185307179f * i * base_freq / sample_rate;
                 float envelope = 0.3f + 0.2f * sinf(6.283185307179f * i / size);
                 int8_t sample = static_cast<int8_t>(50.0f * envelope * sinf(phase));
-                buffer[i*2] = sample;
-                buffer[i*2+1] = sample;
+                data_buffer[i*2] = sample;
+                data_buffer[i*2+1] = sample;
             }
             break;
         }
 
         case ALERT_FAR: {
-            ESP_LOGI(TAG, "generateWaveform ALERT_FAR");
             // Steady 800Hz sine wave with gentle stereo panning
             base_freq = 800;
             uint32_t size = sample_rate / base_freq;
-            buffer.resize(size * 2);
+            data_buffer.resize(size * 2);
             for (uint32_t i = 0; i < size; i++) {
                 float phase = 6.283185307179f * i / size;
                 int8_t sample = static_cast<int8_t>(70.0f * sinf(phase));
-                buffer[i*2] = static_cast<int8_t>(sample * 0.8f); // Left quieter
-                buffer[i*2+1] = sample;                           // Right louder
+                data_buffer[i*2] = static_cast<int8_t>(sample * 0.8f); // Left quieter
+                data_buffer[i*2+1] = sample;                           // Right louder
             }
             break;
         }
@@ -976,55 +1007,54 @@ static std::vector<int8_t> generateWaveformX(alert_level_t level) {
             // Dual-tone (800Hz + 1200Hz) for better recognition
             base_freq = 800;
             uint32_t size = sample_rate / base_freq;
-            buffer.resize(size * 2);
+            data_buffer.resize(size * 2);
             for (uint32_t i = 0; i < size; i++) {
                 float phase1 = 6.283185307179f * i / size;
                 float phase2 = 6.283185307179f * i * 1.5f / size; // 1.5x frequency
                 int8_t sample = static_cast<int8_t>(50.0f * (sinf(phase1) + 0.6f * sinf(phase2)));
-                buffer[i*2] = sample;
-                buffer[i*2+1] = sample;
+                data_buffer[i*2] = sample;
+                data_buffer[i*2+1] = sample;
             }
             break;
         }
 
         case ALERT_MEDIUM: {
             // Sawtooth wave at 1000Hz for increased urgency
-            base_freq = 900;
+            base_freq = 1000;
             uint32_t size = sample_rate / base_freq;
-            buffer.resize(size * 2);
+            data_buffer.resize(size * 2);
             for (uint32_t i = 0; i < size; i++) {
                 float position = static_cast<float>(i) / size;
                 int8_t sample = static_cast<int8_t>(90.0f * (2.0f * position - 1.0f));
-                buffer[i*2] = sample;
-                buffer[i*2+1] = -sample; // Anti-phase for stereo width
+                data_buffer[i*2] = sample;
+                data_buffer[i*2+1] = -sample; // Anti-phase for stereo width
             }
             break;
         }
 
         case ALERT_CLOSE: {
             // Pulsed square wave at 1200Hz (4 pulses per second)
-            base_freq = 1000;
+            base_freq = 1200;
             uint32_t pulse_rate = 4;
             uint32_t size = sample_rate / pulse_rate;
-            buffer.resize(size * 2);
+            data_buffer.resize(size * 2);
             uint32_t samples_per_tone = sample_rate / base_freq;
             
             for (uint32_t i = 0; i < size; i++) {
                 uint32_t tone_pos = i % samples_per_tone;
                 bool pulse_active = (i / samples_per_tone) % 2 == 0;
                 int8_t sample = pulse_active ? (tone_pos < samples_per_tone/2 ? 100 : -100) : 0;
-                buffer[i*2] = sample;
-                buffer[i*2+1] = sample;
+                data_buffer[i*2] = sample;
+                data_buffer[i*2+1] = sample;
             }
             break;
         }
 
         case ALERT_IMMEDIATE: {
-             ESP_LOGI(TAG, "generateWaveform ALERT_IMMEDIATE");
             // Aggressive band-limited square wave with harmonics and stereo panning
-            base_freq = 1200;
+            base_freq = 600;
             uint32_t size = sample_rate / base_freq;
-            buffer.resize(size * 2);
+            data_buffer.resize(size * 2);
             for (uint32_t i = 0; i < size; i++) {
                 float phase = 6.283185307179f * i / size;
                 // Band-limited square wave approximation
@@ -1033,180 +1063,15 @@ static std::vector<int8_t> generateWaveformX(alert_level_t level) {
                 sample += 0.1f * sinf(5.0f * phase);
                 int8_t left = static_cast<int8_t>(120.0f * sample);
                 int8_t right = static_cast<int8_t>(120.0f * -sample); // Opposite phase
-                buffer[i*2] = left;
-                buffer[i*2+1] = right;
+                data_buffer[i*2] = left;
+                data_buffer[i*2+1] = right;
             }
             break;
         }
 
         default:
-            return buffer;
-    }    
-    return buffer;
-}
-
-/*
-// Pre-generate all waveforms and cache them
-static void initWaveformCache() {
-
-    ESP_LOGI(TAG, "initWaveformCache ");
-    cache_mutex = xSemaphoreCreateMutex();
-    
-    xSemaphoreTake(cache_mutex, portMAX_DELAY);
-    waveform_cache = {
-        {ALERT_VERYFAR, generateWaveform(ALERT_VERYFAR)},
-        {ALERT_FAR, generateWaveform(ALERT_FAR)},
-        {ALERT_MEDIUMFAR, generateWaveform(ALERT_MEDIUMFAR)},
-        {ALERT_MEDIUM, generateWaveform(ALERT_MEDIUM)},
-        {ALERT_CLOSE, generateWaveform(ALERT_CLOSE)},
-        {ALERT_IMMEDIATE, generateWaveform(ALERT_IMMEDIATE)}
-    };
-    xSemaphoreGive(cache_mutex);
-}
-*/
-
-
-static void audioTask(void *pvParameters) {
-    // One-time hardware init
-   ESP_LOGI(TAG, "audioTask called ");
-            pwm_audio_config_t pac = {
-        .gpio_num_left = LEFT_CHANNEL_GPIO,
-        .gpio_num_right = RIGHT_CHANNEL_GPIO,
-        .ledc_channel_left = LEDC_CHANNEL_0,
-        
-        .ledc_channel_right = LEDC_CHANNEL_1,
-        .ledc_timer_sel = LEDC_TIMER_0,
-#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 0, 0)
-        .tg_num = TIMER_GROUP_0,
-        .timer_num = TIMER_0,
-#endif
-        .duty_resolution = LEDC_TIMER_8_BIT,
-        .ringbuf_len = 1024 * 4
-        };
-
-
-    ESP_ERROR_CHECK(pwm_audio_init(&pac));
-    ESP_ERROR_CHECK(pwm_audio_set_param(SAMPLE_RATE, LEDC_TIMER_8_BIT, 2));
-    pwm_audio_start();
-
-    alert_level_t current_level = ALERT_SILENT;
-    uint32_t samples_played = 0;
-    const uint32_t duration_samples = SAMPLE_RATE * 0.5; // 500ms default
-
- //   pwm_audio_init(&pac);
- //   pwm_audio_set_param(48000, LEDC_TIMER_8_BIT, 2);
-  ESP_LOGI(TAG, "audioTask pwm_audio_init done ");
-
-     while (1) {
-        // Check for new commands (non-blocking)
-        if (xQueueReceive(audio_queue, &current_level, 0) == pdTRUE) {
-            samples_played = 0;
-            if (current_level == ALERT_SILENT) {
-                pwm_audio_stop();
-                continue;
-            }
-            pwm_audio_start();
-        }
-
-        // Generate and play audio if active
-        if (current_level != ALERT_SILENT && samples_played < duration_samples) {
-            int8_t samples[256];  // Small buffer for real-time generation
-            size_t bytes_written;
-            
-            // Generate appropriate waveform
-            generateWaveform(current_level, samples, sizeof(samples));
-            
-            // Write to audio interface
-            pwm_audio_write(reinterpret_cast<uint8_t*>(samples), 
-                          sizeof(samples), &bytes_written, portMAX_DELAY);
-            
-            samples_played += bytes_written / 2;
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
+            return;
     }
-}
-
-
-void initAudio() {
-    // Create audio command queue
-    audio_queue = xQueueCreate(5, sizeof(alert_level_t));
-    
-    // Create high-priority audio task
-    xTaskCreatePinnedToCore(
-        audioTask,
-        "audio",
-        4096,  // Stack size
-        NULL,
-        5,     // Higher priority (5)
-        &xHandle_Audio,       /* Task handle. */
-        0      // Core 0
-    );
-
-
-
-}
-
-
-void initAudioSystemX() {
-  //  initWaveformCache();
-    audio_queue = xQueueCreate(10, sizeof(audio_command_t));
-    
-    xTaskCreatePinnedToCore(
-        audioTask,
-        "AudioPlayer",
-        8192,  // Larger stack for cache handling
-        NULL,
-        configMAX_PRIORITIES - 2,  // High priority
-        NULL,
-        PRO_CPU_NUM  // Dedicated core if possible
-    );
-}
-
-/*
-static void audioTaskxx(void *pvParameters) {
-
-    if (waveform_cache.find(cmd.level) == waveform_cache.end()) {
-    // Generate and cache waveform
-    waveform_cache[cmd.level] = generateWaveform(cmd.level);
-}
-auto& data_buffer = waveform_cache[cmd.level];
-
- // Configure PWM audio
-    pwm_audio_config_t pac = {
-        
-        .gpio_num_left = LEFT_CHANNEL_GPIO,
-        .gpio_num_right = RIGHT_CHANNEL_GPIO,
-        .ledc_channel_left = LEDC_CHANNEL_0,
-        
-        .ledc_channel_right = LEDC_CHANNEL_1,
-        .ledc_timer_sel = LEDC_TIMER_0,
-#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 0, 0)
-        .tg_num = TIMER_GROUP_0,
-        .timer_num = TIMER_0,
-#endif
-        .duty_resolution = LEDC_TIMER_8_BIT,
-        .ringbuf_len = 1024 * 8
-    };
-
-   
-    if (pwm_audio_init(&pac) != ESP_OK) {
-        vTaskDelete(NULL);
-        return;
-    }
-    pwm_audio_set_param(48000, LEDC_TIMER_8_BIT, 2);
-
-    audio_command_t cmd;
-    
-    while (1) {
-        if (xQueueReceive(audio_queue, &cmd, portMAX_DELAY) == pdTRUE) {
-            if (cmd.level == ALERT_SILENT) {
-                pwm_audio_stop();
-                continue;
-            }
-            
-            // Generate waveform based on cmd.level and cmd.duration_ms
-            // (Insert the waveform generation code from previous implementation here)
             
             pwm_audio_start();
             
@@ -1228,9 +1093,7 @@ auto& data_buffer = waveform_cache[cmd.level];
         }
     }
 }
-*/
 
-/*
 void initAudioTask() {
     // Create command queue
     audio_queue = xQueueCreate(5, sizeof(audio_command_t));
@@ -1241,34 +1104,63 @@ void initAudioTask() {
         "AudioPlayer",       // Task name
         4096,               // Stack size
         NULL,               // Parameters
-        tskIDLE_PRIORITY + 2, // Priority
-        NULL                // Task handle
+        4, // tskIDLE_PRIORITY + 2, // Priority
+        &xHandle_Audio                // Task handle
     );
 }
-*/
 
 void playWarningToneAsync(alert_level_t level, uint32_t duration_ms) {
+    if (audio_queue == NULL) return;
+    
     audio_command_t cmd = {
         .level = level,
-        .duration_ms = duration_ms,
-        .stop_current = false
+        .duration_ms = duration_ms
     };
-
-    ESP_LOGI(TAG, "playWarningToneAsync called");
-    xQueueSend(audio_queue, &cmd, 0);  // Non-blocking
+    
+    xQueueSend(audio_queue, &cmd, pdMS_TO_TICKS(100));
 }
+/*
+// Updated alert handler using async playback
+void update_beeper_alerts(alert_level_t new_level) {
+    // Visual alerts (unchanged)
+    switch (new_level) {
+        case ALERT_IMMEDIATE:
+            blink_task_init(RED_PIN_1, 5, 300);
+            break;
+        case ALERT_CLOSE:
+            blink_task_init(YELLOW_PIN, 2, 500);
+            break;
+        default:
+            break;
+    }
 
-void stopAudioImmediately() {
-
-     ESP_LOGI(TAG, "stopAudioImmediately called");
-
-    audio_command_t cmd = {
-        .level = ALERT_SILENT,
-        .duration_ms = 0,
-        .stop_current = true
-    };
-    xQueueSend(audio_queue, &cmd, 0);
+    // Audio alerts with async playback
+    switch (new_level) {
+        case ALERT_VERYFAR:
+            playWarningToneAsync(new_level, 300);
+            break;
+        case ALERT_FAR:
+            playWarningToneAsync(new_level, 400);
+            break;
+        case ALERT_MEDIUMFAR:
+            playWarningToneAsync(new_level, 500);
+            break;
+        case ALERT_MEDIUM:
+            playWarningToneAsync(new_level, 600);
+            break;
+        case ALERT_CLOSE:
+            playWarningToneAsync(new_level, 800);
+            break;
+        case ALERT_IMMEDIATE:
+            playWarningToneAsync(new_level, 1000);
+            break;
+        default:
+            playWarningToneAsync(ALERT_SILENT, 0);
+            break;
+    }
 }
+    */
+///////////////////////// end tasks without caching
 
 /*
 static size_t before_free_8bit;
@@ -1362,6 +1254,10 @@ bool playAudio(uint32_t duration_ms, uint32_t frequency_hz) {
     pwm_audio_deinit();
     return true;
 }
+
+
+
+
 // Map your existing alert levels to specific warning sounds
 /*
 
@@ -2360,10 +2256,22 @@ if (current_time - last_update_time > alert_update_period ) {
 
  ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
 
-            if (audio_queue) {
-        xQueueSend(audio_queue, &new_level, portMAX_DELAY);
-    }
+  //  if (audio_queue != NULL) {
+  //      xQueueSend(audio_queue, &new_level, portMAX_DELAY);
+  //  }
 
+playWarningToneAsync(new_level, 200);
+
+/*
+    if (audio_state.queue) {
+         ESP_LOGI(TAG, "xQueueSendFromISR %d ", new_level);
+        BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+        xQueueSendFromISR(audio_state.queue, &new_level, &xHigherPriorityTaskWoken);
+        if (xHigherPriorityTaskWoken) {
+            portYIELD_FROM_ISR();
+        }
+    }
+*/
 
 if (direction == 1){
 
@@ -2385,7 +2293,7 @@ if (direction == 1){
         #ifdef useVibrator2
             vibrator_task_init( VIBRATORPIN, 1, 100, 50);
         #endif
-            playWarningToneAsync(new_level, 800);
+         //   playWarningToneAsync(new_level, 800);
             blink_task_init(RED_PIN_1, 2, 300); //
             break;
 
@@ -2467,7 +2375,7 @@ vibrator_task_init( VIBRATORPIN, 1, 200, 100);
 #endif
 
 #ifdef useAudio
-playWarningToneAsync(new_level, 1000);
+//playWarningToneAsync(new_level, 1000);
 #endif
 
            // playWarningToneAsync(new_level, 1000);
@@ -2559,7 +2467,7 @@ vibrator_task_init( VIBRATORPIN, 1, 200, 100);
 #endif
 
 #ifdef useAudio
-playWarningToneAsync(new_level, 1000);
+//playWarningToneAsync(new_level, 1000);
 #endif
 
 //gpio_set_level(VIBRATORPIN, 1); 
@@ -2654,7 +2562,7 @@ vibrator_task_init( VIBRATORPIN, 1, 100, 50);
 #endif
 
 #ifdef useAudio
-playWarningToneAsync(new_level, 800);
+//playWarningToneAsync(new_level, 800);
 //playWarningTone(new_level, 100); 
 //playWarningTone(new_level, 50); 
 #endif
@@ -2674,7 +2582,7 @@ vibrator_task_init( VIBRATORPIN, 1, 50, 50);
 #endif
 
 #ifdef useAudio
-playWarningToneAsync(new_level, 600);
+//playWarningToneAsync(new_level, 600);
 //playWarningTone(new_level, 100); 
 #endif
 
@@ -2692,7 +2600,7 @@ vibrator_task_init( VIBRATORPIN, 1, 50, 100);
 #endif
 
 #ifdef useAudio
-playWarningToneAsync(new_level, 500);
+//playWarningToneAsync(new_level, 500);
 //playWarningTone(new_level, 100); 
 #endif
 
@@ -2706,7 +2614,7 @@ gpio_set_level(GREEN_PIN_1, 1);
         if (new_level ==2){
 
             #ifdef useAudio
-            playWarningToneAsync(new_level, 400);
+      //      playWarningToneAsync(new_level, 400);
 //playWarningTone(new_level, 100); 
 #endif
 
@@ -2720,7 +2628,7 @@ gpio_set_level(GREEN_PIN_1, 1);
         if (new_level ==1){
 
 #ifdef useAudio
-playWarningToneAsync(new_level, 300);
+//playWarningToneAsync(new_level, 300);
 //playWarningTone(new_level, 100); 
 #endif
 
@@ -3961,11 +3869,6 @@ gpio_set_direction(RED_PIN_1, GPIO_MODE_OUTPUT);
 gpio_set_direction(BLUE_PIN_1, GPIO_MODE_OUTPUT);
 gpio_set_direction(GREEN_PIN_1, GPIO_MODE_OUTPUT);
 
-#ifdef useAudio
-initAudio(); 
-
-//playWarningToneAsync(ALERT_IMMEDIATE, 500);
-#endif
 
     uint32_t last_sensor_read = 0;
     i2c_port_t i2c_port = I2C_NUM_1;
@@ -4218,6 +4121,15 @@ int count = 0;
     }
  #endif
 
+#ifdef useAudio
+//initAudioSystem();
+playAudio(500, 1000);
+initAudioTask();
+
+playWarningToneAsync(ALERT_CLOSE, 200);
+playWarningToneAsync(ALERT_IMMEDIATE, 200);
+//playWarningToneAsync(ALERT_IMMEDIATE, 500);
+#endif
 
 // blink_task_init(5, 500); // Blink 5 times with 500 ms interval
 
