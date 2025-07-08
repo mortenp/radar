@@ -1,7 +1,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+//#include "vl53l5cx_api.h"
 #include "vl53l5cx_api.h"
+//#include "vl53l0x.h"
+
 
 #include "esp_log.h"
 
@@ -64,6 +67,12 @@
 #include "driver/uart.h"
 
 #include "pwm_audio.h"
+//#include "driver/i2s.h"
+//#include "soc/soc.h" // For ets_delay_us
+//#include "driver/sdm.h"
+
+//#include "ets_sys.h"
+
 #include <map>
 
 //import std;
@@ -76,7 +85,7 @@
 #define useUltrasound 
 #undef useVl53l5cx
 #undef useUartA02YYUW
-#define useGPS
+//#define useGPS
 #undef useGPS_2
 #undef useXiaoCam
 #undef  useUart 
@@ -205,7 +214,7 @@ static audio_state_t audio_state = {
 static constexpr uint32_t SAMPLE_RATE = 16000;  // Optimal for ESP32 audio
 static constexpr size_t RINGBUF_SIZE = 1024 * 4; // 4KB ring buffer
 static constexpr uint32_t DEFAULT_DURATION_MS = 500;
-
+const int BIT_DEPTH = 8;       // Bit depth. 8-bit is standard for PWM audio on ESP32.
 static volatile bool audio_active = false;
 static alert_level_t current_level = ALERT_SILENT;
 
@@ -293,7 +302,7 @@ static const alert_config_t alert_configs[] = {
 #define GREEN_PIN  GPIO_NUM_45
 
 #define RED_PIN_1     GPIO_NUM_35
-#define BLUE_PIN_1  GPIO_NUM_14
+#define BLUE_PIN_1  GPIO_NUM_14 // yellow traffic light
 #define GREEN_PIN_1  GPIO_NUM_37
 
 // Define GPIO pin number
@@ -317,6 +326,32 @@ static TaskHandle_t xHandle_GPS;
 #ifdef useAudio
 static TaskHandle_t audioTaskHandle;
 #endif
+
+//TaskHandle_t sensorTaskHandle = NULL;
+//TaskHandle_t audioTaskHandle = NULL;
+QueueHandle_t audioAlertQueue = NULL;
+SemaphoreHandle_t g_i2c_bus_mutex = NULL;
+//vl53l0x_dev_t dev_vl53l0x; // Device descriptor for the sensor
+
+
+// --- Sigma-Delta Audio Configuration for ESP-IDF v5.5 ---
+//#define AUDIO_SAMPLE_RATE   (22050)      // Sample rate for audio waveform generation
+//#define SDM_CARRIER_FREQ_HZ (1 * 1000 * 1000) // 1 MHz carrier frequency for the modulator
+//#define SDM_GPIO_NUM        (GPIO_NUM_5) // The GPIO pin for SDM output
+//sdm_channel_handle_t sdm_chan = NULL;
+
+
+// --- I2S Audio Configuration ---
+//#define I2S_SAMPLE_RATE     (16000)
+//#define I2S_BUFFER_SAMPLES  (256)
+//#define I2S_PORT            (I2S_NUM_0)
+//#define DAC_PIN             (GPIO_NUM_25)
+// --- Forward Declarations ---
+void audioTask(void *parameter);
+void play_tone(float frequency, int duration_ms);
+void stop_tone();
+void configure_i2s();
+//void configure_sdm_audio();
 
 
 #define movement_timeout_msec 50
@@ -368,11 +403,11 @@ uint16_t range;
 #define UART_BUFFER_SIZE (1024)
 #define UART_TIMEOUT_MS 30
 
-//#ifdef useGPS
+#ifdef useGPS
 #define UART_GPS UART_NUM_2 
 #define UART_GPS_TXD GPIO_NUM_6 
 #define UART_GPS_RXD GPIO_NUM_7 
-//#endif
+#endif
 
 #ifdef useXiaoCam
 #define CAM_PIN        GPIO_NUM_40
@@ -419,7 +454,7 @@ static uint16_t  total_average_cm = 150;
 #ifdef useRGBLed
 SemaphoreHandle_t led_strip_mutex;
 #endif
-SemaphoreHandle_t g_i2c_bus_mutex;
+//SemaphoreHandle_t g_i2c_bus_mutex;
 SemaphoreHandle_t uart_mutex;
 SemaphoreHandle_t  ultrasound_mutex;
 // ----------------------------------------------------------------
@@ -456,12 +491,17 @@ void data_processor_task(void *pvParameters);
 #endif
 
 #ifdef useAudio
-void audioTask(void *pvParameters);
+//void audioTask(void *pvParameters);
+bool play_sine_tone(uint32_t duration_ms, uint32_t frequency) ;
+void audioTask(void *parameter);
 #endif
 
 
 void vl53l5cx_reader_task(void *pvParameters);
 bool vl53l5cx_recover(VL53L5CX_Configuration *dev);
+
+
+
 
 //void blink_task(void *pvParameters);
 // Task prototype
@@ -967,255 +1007,357 @@ TaskHandle_t xHandle_blink = NULL;
 
 #ifdef useAudio
 
+/**
+ * @brief Generates and plays a sine wave tone for a given frequency and duration.
+ *
+ * This function is adapted for ESP-IDF. It dynamically allocates memory, fills it with
+ * sine wave data, plays it using pwm_audio, and then frees the memory.
+ *
+
+ * @param duration_ms The duration of the tone in milliseconds.
+ * @param frequency The frequency of the tone in Hz.
+ */
+bool play_sine_tone(uint32_t duration_ms, uint32_t frequency) {
+
+    if (frequency == 0) {
+        // A frequency of 0 is silence, we can just delay.
+      //  vTaskDelay(pdMS_TO_TICKS(duration_ms));
+        return false;
+    }
 
 
-void generateWaveform(alert_level_t level, int8_t* buffer, size_t size) {
-    static uint32_t phase_counter = 0;
-    const uint32_t sample_rate = 16000;
-    
-    // Common parameters
-    //float amplitude = 0;
-    //float freq = 800.0f; // Base frequency
-    float phase_step = 0;
-    
-    const float base_freq = 800.0f;
-    
-    float freq = base_freq;
-    float amplitude = 127.0f;
-    
+if (xSemaphoreTake(audio_mutex, portMAX_DELAY) == pdTRUE) {
+ ESP_LOGD(TAG, "audio Got mutex .");
 
-    // Configure waveform based on alert level
-    switch(level) {
-        case ALERT_SILENT:
-            memset(buffer, 0, size);
-            return;
-            
-        case ALERT_VERYFAR:
-            amplitude = 40.0f;
-            freq = 600.0f;
-            ESP_LOGI("AUDIO", "generateWaveform ALERT_VERYFAR");
-            break;
-            
-        case ALERT_FAR:
-            amplitude = 60.0f;
-            freq = 800.0f;
-            ESP_LOGI("AUDIO", "generateWaveform ALERT_FAR");
-            break;
-            
-        case ALERT_MEDIUMFAR:
-            amplitude = 80.0f;
-            freq = 1000.0f;
-            ESP_LOGI("AUDIO", "generateWaveform ALERT_MEDIUMFAR");
-            break;
-            
-        case ALERT_MEDIUM:
-            amplitude = 100.0f;
-            freq = 1200.0f;
-            ESP_LOGI("AUDIO", "generateWaveform ALERT_MEDIUM");
-            break;
-            
-        case ALERT_CLOSE:
-            amplitude = 120.0f;
-            freq = 1500.0f;
-            ESP_LOGI("AUDIO", "generateWaveform ALERT_CLOSE");
-            break;
-            
-        case ALERT_IMMEDIATE:
-            amplitude = 127.0f;
-            freq = 2000.0f;
-            ESP_LOGI("AUDIO", "generateWaveform ALERT_IMMEDIATE");
-            break;
-            
-        default:
 
-            memset(buffer, 0, size);
-            ESP_LOGI("AUDIO", "generateWaveform default");
-          //  return;
+    ESP_LOGI(TAG, "play_sine_tone tone: %lu Hz, %lu ms", frequency, duration_ms);
+
+    // 1. Calculate the total number of samples needed
+    uint32_t total_samples = (SAMPLE_RATE * duration_ms) / 1000;
+
+    // 2. Allocate memory for the audio buffer on the heap
+    // We use uint8_t because we specified an 8-bit depth
+    uint8_t *sine_wave_buffer = (uint8_t *)malloc(total_samples * sizeof(uint8_t));
+
+    // IMPORTANT: Check if memory allocation was successful
+    if (sine_wave_buffer == nullptr) {
+        ESP_LOGE(TAG, "Error: Failed to allocate memory for audio buffer!");
+        return false;
+    }
+
+    // 3. Generate the sine wave samples
+    for (uint32_t i = 0; i < total_samples; ++i) {
+        // The formula for a sine wave is: Amplitude * sin(2 * PI * frequency * time)
+        // 'time' is the sample number 'i' divided by the sample rate.
+        // Amplitude for 8-bit audio is 127.5. We add 127.5 to shift the
+        // wave (-1 to +1) to the unsigned 8-bit range (0 to 255).
+        double angle = 2.0 * M_PI * frequency * i / SAMPLE_RATE;
+        sine_wave_buffer[i] = (uint8_t)(127.5 + 127.5 * sin(angle));
+    }
+
+    // 4. Configure and start the PWM audio player
+ //   pwm_audio_config_t config = {
+ //       .duty_resolution = LEDC_TIMER_8_BIT, // Matches our 8-bit data
+ //       .timer_num = LEDC_TIMER_0,
+ //       .ringbuf_len = 1024 * 8,             // Ring buffer size, adjust as needed
+ //   };
+
+   
+ //   pwm_audio_start(LEFT_CHANNEL_GPIO, &config);
+
+    // 5. Write the generated audio data to the player's ring buffer
+    size_t bytes_written;
+    // 'portMAX_DELAY' will block until all data is written to the buffer
+    pwm_audio_write(sine_wave_buffer, total_samples, &bytes_written, portMAX_DELAY);
+
+    // If not all bytes could be written, it indicates an issue (e.g., buffer too small)
+    if (bytes_written < total_samples) {
+        ESP_LOGE(TAG, "Not all bytes written to buffer. Wrote %d of %lu", bytes_written, total_samples);
     }
     
-    phase_step = 2.0f * M_PI * freq / sample_rate;
-    
-    // Generate samples
-    for (size_t i = 0; i < size; i++) {
-        switch(level) {
-            case ALERT_VERYFAR:
-            ESP_LOGI("AUDIO", "generateWaveform Generate ALERT_VERYFAR");
-                // Gentle pulsating sine wave
-                buffer[i] = amplitude * 0.5f * (1.0f + sinf(phase_counter * 0.1f)) 
-                          * sinf(phase_counter);
-                break;
-                
-            case ALERT_FAR:
-            ESP_LOGI("AUDIO", "generateWaveform Generate ALERT_FAR");
-                // Steady sine wave with slight stereo effect
-                buffer[i] = amplitude * sinf(phase_counter + (i % 2) * 0.2f);
-                break;
-                
-            case ALERT_MEDIUMFAR:
-            ESP_LOGI("AUDIO", "generateWaveform Generate ALERT_MEDIUMFAR");
-                // Dual-tone for distinctiveness
-                buffer[i] = amplitude * 0.7f * (sinf(phase_counter) 
-                          + 0.3f * sinf(phase_counter * 1.5f));
-                break;
-                
-            case ALERT_MEDIUM:
-            ESP_LOGI("AUDIO", "generateWaveform Generate ALERT_MEDIUM");
-                // Mild sawtooth for urgency
-                buffer[i] = amplitude * (2.0f * fmodf(phase_counter/M_PI, 1.0f) - 1.0f);
-                break;
-                
-                case ALERT_CLOSE:
-                ESP_LOGI("AUDIO", "generateWaveform Generate ALERT_CLOSE");
-                // Pulsed square wave (fixed modulo issue)
-                {
-                    int pulse_phase = static_cast<int>(phase_counter * 10.0f / M_PI) % 20;
-                    buffer[i] = (pulse_phase < 10) ? 0 : 
-                               ((sinf(phase_counter) > 0) ? amplitude : -amplitude);
-                }
-                break;
-             
-            case ALERT_IMMEDIATE:
-            ESP_LOGI("AUDIO", "generateWaveform Generate ALERT_IMMEDIATE");
-                // Full-volume band-limited square wave
-                {
-                    float sample = 0.6f * sinf(phase_counter);
-                    sample += 0.3f * sinf(3.0f * phase_counter);
-                    sample += 0.1f * sinf(5.0f * phase_counter);
-                    buffer[i] = amplitude * sample;
-                }
-                break;
-                
-            default:
-            ESP_LOGI("AUDIO", "generateWaveform Generate default");
-                buffer[i] = 0;
-        }
-        
-        phase_counter += phase_step;
-        if (phase_counter > 2.0f * M_PI) {
-            phase_counter -= 2.0f * M_PI;
-        }
-    }
+    // 6. Wait for the sound to finish playing
+    // The library plays in the background, so we must manually wait here.
+    // Add a small grace period to ensure the buffer is fully played.
+    vTaskDelay(pdMS_TO_TICKS(duration_ms + 20));
+
+    // 7. Stop the player and clean up resources
+   //pwm_audio_stop();
+
+    // 8. CRITICAL: Free the allocated memory to prevent memory leaks
+    free(sine_wave_buffer);
+
+    ESP_LOGI(TAG, "Playback finished.");
+
+xSemaphoreGive(audio_mutex);
+ESP_LOGD(TAG, "audio gave mutex .");
+
+   
+} // got mutex
+
+ else {
+ESP_LOGD(TAG, "no audio  mutex .");
+
+}
+
+ return true;
+
 }
 
 
-///////// audio tasks without caching ///////////////
-
-// Global state tracking
-//typedef struct {
- //   volatile bool is_playing;
- //   volatile bool is_initialized;
- //       alert_level_t current_level;
- //   uint32_t samples_remaining;
- //   bool active;
-//} audio_state_t;
-
-typedef struct {
-    // Control Flags
-    volatile bool is_initialized;    // Hardware initialized
-    volatile bool is_playing;        // Actively playing audio
-    volatile bool stop_requested;    // Emergency stop flag
-    
-    // Playback State
-    alert_level_t current_level;
-    uint32_t total_samples;         // Total samples to play
-    uint32_t played_samples;        // Samples already played
-    
-    // Timing
-    uint32_t duration_ms;           // Current duration
-    TickType_t last_wdt_reset;      // Last watchdog reset time
-} audio_state_t;
-
-static audio_state_t audio_state = {
-    .is_initialized = false,
-    .is_playing = false,
-    .stop_requested = false,
-    .current_level = ALERT_SILENT,
-    .total_samples = 0,
-    .played_samples = 0,
-    .duration_ms = 0,
-    .last_wdt_reset = 0
-};
-
-//static audio_state_t audio_state = {false, false};
-
-uint32_t getAlertDuration(alert_level_t level) {
-    switch(level) {
-        case ALERT_VERYFAR:  return 300;  // 300ms
-        case ALERT_FAR:      return 400;  // 400ms  
-        case ALERT_MEDIUM:   return DEFAULT_DURATION_MS; // 500ms
-        case ALERT_CLOSE:    return 750;  // 750ms
-        case ALERT_IMMEDIATE:return 1000; // 1s
-        default: return DEFAULT_DURATION_MS;
-    }
-}
-
-
-
-void audioTask(void *pvParameter) {
-    // 1. One-time hardware init
-  
-    pwm_audio_config_t pac = {
+bool initPWMaudio2 (){
+    // Configure PWM audio
+        pwm_audio_config_t pac = {
         .gpio_num_left = LEFT_CHANNEL_GPIO,
         .gpio_num_right = RIGHT_CHANNEL_GPIO,
-        .ledc_channel_left = LEDC_CHANNEL_0,   
+        .ledc_channel_left = LEDC_CHANNEL_0,
         .ledc_channel_right = LEDC_CHANNEL_1,
         .ledc_timer_sel = LEDC_TIMER_0,
         .duty_resolution = LEDC_TIMER_8_BIT,
-        .ringbuf_len = 1024 * 4
+        .ringbuf_len = RINGBUF_SIZE
+    };
+
+    // Initialize audio system
+    if (pwm_audio_init(&pac) != ESP_OK) {
+       return false;
+      ESP_LOGW(TAG, "pwm_audio_init error");
+    }
+  pwm_audio_start();
+  return true;
+}
+
+bool playAudio(uint32_t duration_ms, uint32_t frequency_hz) {
+    // Validate input parameters
+    if (frequency_hz == 0 || duration_ms == 0) {
+        return false;
+    }
+
+
+ESP_LOGI(TAG, "playAudio %d %d", duration_ms, frequency_hz);
+
+    // Calculate buffer size based on desired frequency
+    const uint32_t sample_rate = SAMPLE_RATE;
+    const uint32_t size = sample_rate / frequency_hz;
+    const float PI_2 = 6.283185307179f;
+    const float amplitude = 127.8f;
+
+    // Create stereo buffer (interleaved L/R channels)
+    std::vector<int8_t> data_buffer(size * 2);
+
+    // Generate sine wave for left channel, cosine for right (phase difference)
+    for (uint32_t i = 0; i < size; i++) {
+        const float phase = PI_2 * static_cast<float>(i) / static_cast<float>(size);
+        data_buffer[i*2] = static_cast<int8_t>(amplitude * sinf(phase));    // Left
+        data_buffer[i*2 + 1] = static_cast<int8_t>(amplitude * cosf(phase)); // Right
+    }
+
+    /*
+    // Configure PWM audio
+        pwm_audio_config_t pac = {
+        .gpio_num_left = LEFT_CHANNEL_GPIO,
+        .gpio_num_right = RIGHT_CHANNEL_GPIO,
+        .ledc_channel_left = LEDC_CHANNEL_0,
+        .ledc_channel_right = LEDC_CHANNEL_1,
+        .ledc_timer_sel = LEDC_TIMER_0,
+        .duty_resolution = LEDC_TIMER_8_BIT,
+        .ringbuf_len = RINGBUF_SIZE
     };
 
 
-    ESP_ERROR_CHECK(pwm_audio_init(&pac));
-    ESP_ERROR_CHECK(pwm_audio_set_param(16000, LEDC_TIMER_8_BIT, 2));
-
-    // 2. Main processing loop
-    while(1) {
-        // Check for new commands
-        alert_level_t new_level;
-        if(xQueueReceive(audioQueue, &new_level, pdMS_TO_TICKS(10))) {
-            if(new_level == ALERT_SILENT) {
-                pwm_audio_stop();
-                audio_active = false;
-            } else {
-                current_level = new_level;
-                audio_active = true;
-                pwm_audio_start();
-            }
-        }
-
-        // Generate and play audio if active
-        if(audio_active) {
-            int8_t samples[128];
-
-            ESP_LOGI("AUDIO", "generateWaveform( %d, %d, %d)", current_level,samples, sizeof(samples) );
-
-            generateWaveform(current_level, samples, sizeof(samples));
-            
-            size_t written;
-            esp_err_t err = pwm_audio_write(
-                reinterpret_cast<uint8_t*>(samples),
-                sizeof(samples),
-                &written,
-                pdMS_TO_TICKS(50)
-            );
-            
-            if(err != ESP_OK) {
-                ESP_LOGE("AUDIO", "Write failed: 0x%x", err);
-                pwm_audio_stop();
-                audio_active = false;
-            }
-        } else {
-            vTaskDelay(pdMS_TO_TICKS(1));
-        }
+    // Initialize audio system
+    if (pwm_audio_init(&pac) != ESP_OK) {
+        return false;
     }
+    pwm_audio_set_param(sample_rate, static_cast<ledc_timer_bit_t>(8), 2);
+    pwm_audio_start();
+*/
+    // Calculate required iterations for duration
+    const uint32_t total_samples = (sample_rate * duration_ms) / 1000;
+    uint32_t samples_played = 0;
+    const uint32_t block_size = 256;  // Optimal write size
+
+    // Playback loop
+    while (samples_played < total_samples) {
+        const uint32_t buffer_pos = (samples_played * 2) % data_buffer.size();
+        const uint32_t remaining_in_buffer = data_buffer.size() - buffer_pos;
+        const uint32_t samples_to_play = std::min({
+            block_size,
+            remaining_in_buffer,
+            (total_samples - samples_played) * 2
+        });
+
+        size_t bytes_written = 0;
+        if (pwm_audio_write(reinterpret_cast<uint8_t*>(data_buffer.data()) + buffer_pos,
+                           samples_to_play,
+                           &bytes_written,
+                           1000 / portTICK_PERIOD_MS) != ESP_OK) {
+            pwm_audio_deinit();
+            return false;
+        }
+
+        samples_played += bytes_written / 2;
+    }
+
+    // Cleanup
+ //   pwm_audio_stop();
+ //   pwm_audio_deinit();
+    return true;
 }
 
-// Initialization
-void initAudioSystem() {
-    audioQueue = xQueueCreate(5, sizeof(alert_level_t));
-    xTaskCreate(audioTask, "AudioPlayer", 4096, NULL, 3, NULL);
+bool initPwmAudio (){
+    // Configure PWM audio
+        pwm_audio_config_t pac = {
+        .gpio_num_left = LEFT_CHANNEL_GPIO,
+        .gpio_num_right = RIGHT_CHANNEL_GPIO,
+        .ledc_channel_left = LEDC_CHANNEL_0,
+        .ledc_channel_right = LEDC_CHANNEL_1,
+        .ledc_timer_sel = LEDC_TIMER_0,
+        .duty_resolution = LEDC_TIMER_8_BIT,
+        .ringbuf_len = RINGBUF_SIZE
+    };
+
+    // Initialize audio system
+    if (pwm_audio_init(&pac) != ESP_OK) {
+        return false;
+    }
+    pwm_audio_set_param(SAMPLE_RATE, static_cast<ledc_timer_bit_t>(8), 2);
+    pwm_audio_start();
+
+return true;
 }
 
+
+
+/**
+ * @brief Task to handle audio playback. It waits for an alert level
+ *        from the queue and plays the corresponding sound.
+ */
+void audioTask(void *parameter) {
+  alert_level_t received_alert_level;
+  alert_level_t last_played_level = (alert_level_t)-1;
+
+  ESP_LOGI(TAG, "Audio Task started");
+  
+  for (;;) {
+
+/*
+static int alert_update_period = 100;
+uint32_t last_update_time = xTaskGetTickCount();
+uint32_t current_time = xTaskGetTickCount();
+if (current_time - last_update_time > alert_update_period ) {
+last_update_time = current_time;
+}
+*/
+
+
+    if (xQueueReceive(audioQueue, &received_alert_level, portMAX_DELAY) == pdTRUE) {
+      //if (received_alert_level != last_played_level) {
+        ESP_LOGI(TAG, "Audio task: Playing alert for level %d", received_alert_level);
+        last_played_level = received_alert_level;
+
+        switch (received_alert_level) {
+ //   play_sine_tone
+// 
+     case ALERT_VERYFAR:   play_sine_tone(100.0, 200); break;
+          case ALERT_FAR:    play_sine_tone(100.0, 300); break;
+          case ALERT_MEDIUMFAR: play_sine_tone(100.0, 500); break;
+          case ALERT_MEDIUM: play_sine_tone(100.0, 600); break;
+          case ALERT_CLOSE:   play_sine_tone(100.0, 700); break;
+          case ALERT_IMMEDIATE: play_sine_tone(100, 800); 
+                               // vTaskDelay(pdMS_TO_TICKS(1));
+                                //play_sine_tone(100, 600); 
+          break;
+          case ALERT_SILENT:   break;
+          default:            break;
+        }
+/*
+          case ALERT_VERYFAR:   playAudio(100.0, 400); break;
+          case ALERT_FAR:    playAudio(100.0, 400); break;
+          case ALERT_MEDIUMFAR: playAudio(100.0, 700); break;
+          case ALERT_MEDIUM: playAudio(200.0, 800); break;
+          case ALERT_CLOSE:   playAudio(200.0, 900); break;
+          case ALERT_IMMEDIATE:   playAudio(200, 1000); break;
+          case ALERT_SILENT:   break;
+          default:            break;
+      }
+          */
+    //}
+  }
+
+   vTaskDelay(pdMS_TO_TICKS(30));
+
+}
+
+}
+
+
+/*
+void audioTask(void *parameter) {
+  alert_level_t received_alert_level;
+  alert_level_t last_played_level = ALERT_NONE;
+
+  ESP_LOGI(TAG, "Audio Task started");
+  configure_i2s();
+  
+  for (;;) {
+    if (xQueueReceive(audioAlertQueue, &received_alert_level, portMAX_DELAY) == pdTRUE) {
+      if (received_alert_level != last_played_level) {
+        ESP_LOGI(TAG, "Audio task: New alert level: %d", received_alert_level);
+        last_played_level = received_alert_level;
+
+       
+        switch (received_alert_level) {
+          case ALERT_VERYFAR:   play_tone(300.0, 500); break;
+          case ALERT_FAR:    play_tone(440.0, 500); break;
+          case ALERT_MEDIUMFAR: play_tone(500.0, 500); break;
+          case ALERT_MEDIUM: play_tone(660.0, 500); break;
+          case ALERT_CLOSE:   play_tone(880.0, 500); break;
+          case ALERT_IMMEDIATE:   play_tone(1000.0, 500); break;
+          case ALERT_SILENT:  stop_tone(); break;
+          default:           stop_tone(); break;
+        }
+      }
+    }
+  }
+}
+*/
+
+/*
+void play_tone(float frequency, int duration_ms) {
+    int samples_to_play = (I2S_SAMPLE_RATE * duration_ms) / 1000;
+    int samples_per_cycle = roundf((float)I2S_SAMPLE_RATE / frequency);
+
+    size_t bytes_written = 0;
+    stop_tone();
+
+    // Allocate memory for one cycle
+    uint8_t* single_cycle_buffer = (uint8_t*)malloc(samples_per_cycle);
+    if (!single_cycle_buffer) {
+        ESP_LOGE(TAG, "Failed to allocate memory for tone buffer");
+        return;
+    }
+
+    for(int i = 0; i < samples_per_cycle; i++) {
+        single_cycle_buffer[i] = 127 + 127 * sin(2 * M_PI * i / samples_per_cycle);
+    }
+    
+    int total_samples_written = 0;
+    while (total_samples_written < samples_to_play) {
+      i2s_write(I2S_PORT, single_cycle_buffer, samples_per_cycle, &bytes_written, portMAX_DELAY);
+      if (bytes_written > 0) {
+        total_samples_written += bytes_written;
+      } else {
+        break;
+      }
+    }
+    free(single_cycle_buffer);
+}
+*/
+
+/*
+void stop_tone() {
+    i2s_zero_dma_buffer(I2S_PORT);
+}
+*/
 
 /*
 void audioTask(void *pvParameter) {
@@ -1355,88 +1497,6 @@ static void check_leak(size_t before_free, size_t after_free, const char *type)
    // TEST_ASSERT_MESSAGE(delta >= TEST_MEMORY_LEAK_THRESHOLD, "memory leak");
 }
 */
-
-
-bool playAudio(uint32_t duration_ms, uint32_t frequency_hz) {
-    // Validate input parameters
-    if (frequency_hz == 0 || duration_ms == 0) {
-        return false;
-    }
-
-    // Calculate buffer size based on desired frequency
-    const uint32_t sample_rate = 48000;
-    const uint32_t size = sample_rate / frequency_hz;
-    const float PI_2 = 6.283185307179f;
-    const float amplitude = 127.8f;
-
-    // Create stereo buffer (interleaved L/R channels)
-    std::vector<int8_t> data_buffer(size * 2);
-
-    // Generate sine wave for left channel, cosine for right (phase difference)
-    for (uint32_t i = 0; i < size; i++) {
-        const float phase = PI_2 * static_cast<float>(i) / static_cast<float>(size);
-        data_buffer[i*2] = static_cast<int8_t>(amplitude * sinf(phase));    // Left
-        data_buffer[i*2 + 1] = static_cast<int8_t>(amplitude * cosf(phase)); // Right
-    }
-
-  /*
-    // Configure PWM audio
-    pwm_audio_config_t pac = {
-        
-        .gpio_num_left = LEFT_CHANNEL_GPIO,
-        .gpio_num_right = RIGHT_CHANNEL_GPIO,
-        .ledc_channel_left = LEDC_CHANNEL_0,
-        
-        .ledc_channel_right = LEDC_CHANNEL_1,
-        .ledc_timer_sel = LEDC_TIMER_0,
-#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 0, 0)
-        .tg_num = TIMER_GROUP_0,
-        .timer_num = TIMER_0,
-#endif
-        .duty_resolution = LEDC_TIMER_8_BIT,
-        .ringbuf_len = 1024 * 4
-    };
-
-    // Initialize audio system
-    if (pwm_audio_init(&pac) != ESP_OK) {
-        return false;
-    }
-    pwm_audio_set_param(sample_rate, static_cast<ledc_timer_bit_t>(8), 2);
-    pwm_audio_start();
-*/
-
-    // Calculate required iterations for duration
-    const uint32_t total_samples = (sample_rate * duration_ms) / 1000;
-    uint32_t samples_played = 0;
-    const uint32_t block_size = 256;  // Optimal write size
-
-    // Playback loop
-    while (samples_played < total_samples) {
-        const uint32_t buffer_pos = (samples_played * 2) % data_buffer.size();
-        const uint32_t remaining_in_buffer = data_buffer.size() - buffer_pos;
-        const uint32_t samples_to_play = std::min({
-            block_size,
-            remaining_in_buffer,
-            (total_samples - samples_played) * 2
-        });
-
-        size_t bytes_written = 0;
-        if (pwm_audio_write(reinterpret_cast<uint8_t*>(data_buffer.data()) + buffer_pos,
-                           samples_to_play,
-                           &bytes_written,
-                           1000 / portTICK_PERIOD_MS) != ESP_OK) {
-            pwm_audio_deinit();
-            return false;
-        }
-
-        samples_played += bytes_written / 2;
-    }
-
-    // Cleanup
-    pwm_audio_stop();
-    pwm_audio_deinit();
-    return true;
-}
 
 
 
@@ -1714,7 +1774,7 @@ void mpu9250_reader_task(void *pvParameters)
 
     ESP_LOGI("MPU9250_TASK", "Fusion task started.");
    vTaskDelay(pdMS_TO_TICKS(100));
-static int mpu9250_update_period = 100;
+static int mpu9250_update_period = 50;
     while (1)
     {
          vTaskDelay(pdMS_TO_TICKS(200));
@@ -1972,7 +2032,7 @@ resetPins();
  #endif
 
  #ifdef useUltrasound
- // ESP_LOGI("PROCESSOR_TASK", "Sending STOP_BIT  to xHandle_ultrasonic and xHandle_ultrasonic_2.");
+ ESP_LOGI("PROCESSOR_TASK", "Sending STOP_BIT  to xHandle_ultrasonic .");
     xTaskNotify( xHandle_ultrasonic, STOP_BIT, eSetBits);
 #endif
 
@@ -2025,7 +2085,7 @@ last_roll = received_data.roll;
             // --- FUSED ORIENTATION DATA (Most Important Output) ---
            ESP_LOGD("PROCESSOR_TASK", "Orientation -> Pitch: %.2f°, Roll: %.2f°", received_data.pitch, received_data.roll);
         }
- vTaskDelay(pdMS_TO_TICKS(300));
+ vTaskDelay(pdMS_TO_TICKS(20));
 
 
     } // while 1
@@ -2417,8 +2477,10 @@ void uart_task(void *pvParameters) {
 }
 #endif
 
+
 static uint32_t last_update_time = xTaskGetTickCount();
-static int alert_update_period = 100;
+static int alert_update_period = 50;
+//
 
 
 // Updated alert handler using async playback
@@ -2426,7 +2488,7 @@ void update_beeper_alerts(alert_level_t new_level, int direction) {
     // Visual alerts (unchanged)
 
 //uint32_t last_update_time = xTaskGetTickCount();
-
+alwaysBeep = true;
 
    // Check if alert level changed
     if (new_level != beeper.current_level || alwaysBeep) {
@@ -2451,11 +2513,20 @@ void update_beeper_alerts(alert_level_t new_level, int direction) {
 
 uint32_t current_time = xTaskGetTickCount();
 
+alert_update_period = 400 / new_level;
+
+
+if(new_level > 4){
+//alert_update_period = 30;
+} else {
+//  alert_update_period = 60;  
+}
+
 
 if (current_time - last_update_time > alert_update_period ) {
- last_update_time = current_time;
+last_update_time = current_time;
 
- ESP_LOGI(TAG, "update perios current_time:%d last_update_time:%d", current_time, last_update_time);
+// ESP_LOGI(TAG, "update period current_time:%d last_update_time:%d", current_time, last_update_time);
 
  ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
 
@@ -2489,22 +2560,36 @@ if (direction == 1){
 
     switch (new_level) {
         case ALERT_IMMEDIATE:
-            blink_task_init(RED_PIN_1, 5, 300);
+            blink_task_init(RED_PIN_1, 2, 300);
+           // blink_task_init(RED_PIN, 2, 300); 
              #ifdef useVibrator2
-            vibrator_task_init( VIBRATORPIN, 2, 80, 50);
+            vibrator_task_init( VIBRATORPIN, 1, 80, 50);
         #endif
- xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ //       xQueueOverwrite(audioAlertQueue, &new_level);
+ #ifdef useAudio
+ ESP_LOGI(TAG, "sens1 xQueueSend to audioQueue", new_level);
+
+xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+#endif
           //   ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
 
             break;
 
         case ALERT_CLOSE:
         #ifdef useVibrator2
-            vibrator_task_init( VIBRATORPIN, 1, 100, 50);
+            vibrator_task_init( VIBRATORPIN, 2, 60, 20);
         #endif
+
+         #ifdef useAudio
+ ESP_LOGI(TAG, "sens1 xQueueSend to audioQueue", new_level);
+
+xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+#endif
+
          //   playWarningToneAsync(new_level, 800);
-            blink_task_init(RED_PIN_1, 2, 300); //
-             xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+            blink_task_init(RED_PIN_1, 1, 300); //
+           
+            // xQueueSend(audioQueue, &new_level, portMAX_DELAY);
             break;
 
          case ALERT_MEDIUM:
@@ -2515,8 +2600,13 @@ if (direction == 1){
             gpio_set_level(RED_PIN_1, 0); 
             gpio_set_level(BLUE_PIN_1, 1);  
             gpio_set_level(GREEN_PIN_1, 0); 
- xQueueSend(audioQueue, &new_level, portMAX_DELAY);
-//            playWarningToneAsync(new_level, 600);
+
+#ifdef useAudio           
+
+ //ESP_LOGI(TAG, "sens1 xQueueSend to audioQueue", new_level);
+xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+
+#endif
             break;
 
          case ALERT_MEDIUMFAR:
@@ -2526,8 +2616,13 @@ if (direction == 1){
             gpio_set_level(RED_PIN_1, 0); 
             gpio_set_level(BLUE_PIN_1, 1);  
             gpio_set_level(GREEN_PIN_1, 1); 
- xQueueSend(audioQueue, &new_level, portMAX_DELAY);
- //           playWarningToneAsync(new_level, 500);
+            
+ //xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ #ifdef useAudio
+// ESP_LOGI(TAG, "sens1 xQueueSend to audioQueue", new_level);
+
+xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+#endif
             break;
             
        case ALERT_FAR:
@@ -2538,8 +2633,10 @@ if (direction == 1){
         gpio_set_level(RED_PIN_1, 0); 
         gpio_set_level(BLUE_PIN_1, 0);  
         gpio_set_level(GREEN_PIN_1, 1); 
-         xQueueSend(audioQueue, &new_level, portMAX_DELAY);
-        //    playWarningToneAsync(new_level, 400);
+        
+ #ifdef useAudio
+//xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+#endif
             break;
 
        case ALERT_VERYFAR:
@@ -2598,9 +2695,119 @@ vibrator_task_init( VIBRATORPIN, 1, 200, 100);
             */
 } // direction 1
 
-//////////// direction 2
-else { 
 
+else { //////////// direction 2
+
+
+
+
+    switch (new_level) {
+        case ALERT_IMMEDIATE:
+           // blink_task_init(RED_PIN, 2, 300);
+            gpio_set_level(RED_PIN, 1); 
+            gpio_set_level(BLUE_PIN, 0);  
+            gpio_set_level(GREEN_PIN, 0); 
+             #ifdef useVibrator2
+            vibrator_task_init( VIBRATORPIN2, 2, 80, 50);
+        #endif
+ //       xQueueOverwrite(audioAlertQueue, &new_level);
+ #ifdef useAudio
+ ESP_LOGI(TAG, "sens2 xQueueSend to audioQueue", new_level);
+
+xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+#endif
+          //   ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
+
+            break;
+
+        case ALERT_CLOSE:
+        #ifdef useVibrator2
+            vibrator_task_init( VIBRATORPIN2, 1, 100, 50);
+        #endif
+
+         #ifdef useAudio
+            xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+        #endif
+
+         //   playWarningToneAsync(new_level, 800);
+           // blink_task_init(RED_PIN, 2, 300); //
+            gpio_set_level(RED_PIN, 1); 
+            gpio_set_level(BLUE_PIN, 1);  
+            gpio_set_level(GREEN_PIN, 0); 
+            // xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+            break;
+
+         case ALERT_MEDIUM:
+         #ifdef useVibrator2
+            vibrator_task_init( VIBRATORPIN2, 1, 50, 50);
+          
+        #endif
+            gpio_set_level(RED_PIN, 0); 
+            gpio_set_level(BLUE_PIN, 1);  
+            gpio_set_level(GREEN_PIN, 0); 
+
+#ifdef useAudio           
+
+// ESP_LOGI(TAG, "sens1 xQueueSend to audioQueue", new_level);
+xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+
+#endif
+            break;
+
+         case ALERT_MEDIUMFAR:
+         #ifdef useVibrator2
+            vibrator_task_init( VIBRATORPIN2, 1, 50, 100);
+        #endif
+            gpio_set_level(RED_PIN, 0); 
+            gpio_set_level(BLUE_PIN, 0);  
+            gpio_set_level(GREEN_PIN, 1); 
+            
+ //xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ #ifdef useAudio
+ //ESP_LOGI(TAG, "sens1 xQueueSend to audioQueue", new_level);
+
+//xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+#endif
+            break;
+            
+       case ALERT_FAR:
+       #ifdef useVibrator2
+      //  vibrator_task_init( VIBRATORPIN, 1, 40, 200);
+        #endif
+// vTaskDelay(pdMS_TO_TICKS(50));
+        gpio_set_level(RED_PIN, 0); 
+        gpio_set_level(BLUE_PIN, 0);  
+        gpio_set_level(GREEN_PIN, 0); 
+        
+ #ifdef useAudio
+ //ESP_LOGI(TAG, "sens1 xQueueSend to audioQueue", new_level);
+
+//xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+#endif
+            break;
+
+       case ALERT_VERYFAR:
+       #ifdef useVibrator2
+      //  vibrator_task_init( VIBRATORPIN, 1, 40, 200);
+        #endif
+// vTaskDelay(pdMS_TO_TICKS(50));
+        gpio_set_level(RED_PIN, 0); 
+        gpio_set_level(BLUE_PIN, 0);  
+        gpio_set_level(GREEN_PIN, 0); 
+          //  playWarningToneAsync(new_level, 400);
+            break;
+
+        default:
+       // playWarningToneAsync(ALERT_SILENT, 0);
+        gpio_set_level(RED_PIN, 0); 
+        gpio_set_level(BLUE_PIN, 0);  
+        gpio_set_level(GREEN_PIN, 0); 
+            break;
+    }
+
+
+
+/*
 if (new_level == 3){
 //blink_task_init(BLUE_PIN_1, 5, 500); // 
 blink_task_init(GREEN_PIN, 1, 80);
@@ -2613,6 +2820,13 @@ blink_task_init(BLUE_PIN, 1, 80);
 #ifdef useVibrator2
 vibrator_task_init( VIBRATORPIN2, 2, 50, 90);
 #endif
+
+ #ifdef useAudio
+ ESP_LOGI(TAG, "sens 2 xQueueSend to audioQueue", new_level);
+
+xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+#endif
+
 }
 
 
@@ -2626,6 +2840,12 @@ vibrator_task_init( VIBRATORPIN2, 2, 100, 80);
 //vibrator_task_init( VIBRATORPIN, 2, 100);
 #endif
 
+ #ifdef useAudio
+ ESP_LOGI(TAG, "sens 2 xQueueSend to audioQueue", new_level);
+
+xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+#endif
+
 }
 
 if (new_level == 6){
@@ -2635,6 +2855,13 @@ blink_task_init(RED_PIN, 2, 80);
 #ifdef useVibrator2
 vibrator_task_init( VIBRATORPIN2, 3, 200, 50);
 #endif
+
+ #ifdef useAudio
+ ESP_LOGI(TAG, "sens 2 xQueueSend to audioQueue", new_level);
+
+xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+#endif
+
 //vTaskDelay(pdMS_TO_TICKS(200));
 //blink_task_init(BLUE_PIN, 3, 200);
 //vTaskDelay(pdMS_TO_TICKS(200));
@@ -2646,6 +2873,8 @@ vibrator_task_init( VIBRATORPIN2, 3, 200, 50);
 
 
         } //new_level ==6
+
+        */
 //vTaskDelay(pdMS_TO_TICKS(200));
 } // end sensor2
 
@@ -2667,19 +2896,19 @@ resetPins();
 
 
 // special for immediate close, always react
-if (new_level ==6){
-blink_task_init(RED_PIN_1, 5, 300); // 
+//if (new_level ==6){
+//blink_task_init(RED_PIN_1, 5, 300); // 
 //blink_task_init(BLUE_PIN_1, 5, 300); // 
 //blink_task_init(GREEN_PIN_1, 5, 300); // 
 
-#ifdef useVibrator2
-vibrator_task_init( VIBRATORPIN, 1, 200, 100);
+//#ifdef useVibrator2
+//vibrator_task_init( VIBRATORPIN, 1, 200, 100);
 
-#endif
+//#endif
 
-#ifdef useAudio
+//#ifdef useAudio
 //playWarningToneAsync(new_level, 1000);
-#endif
+//#endif
 
 //gpio_set_level(VIBRATORPIN, 1); 
 
@@ -2713,6 +2942,9 @@ vibrator_task_init( VIBRATORPIN, 1, 200, 100);
 
 
  ESP_LOGI(TAG, "new_level %d", new_level);
+
+
+
 
 //gpio_set_level(RED_PIN_1, 0); 
 //gpio_set_level(BLUE_PIN_1, 0);  
@@ -2764,6 +2996,23 @@ if (new_level ==6){
             break;
     }
             */
+
+
+            
+if (new_level ==6){
+blink_task_init(RED_PIN_1, 5, 300); // 
+//blink_task_init(BLUE_PIN_1, 5, 300); // 
+//blink_task_init(GREEN_PIN_1, 5, 300); // 
+
+#ifdef useVibrator2
+vibrator_task_init( VIBRATORPIN, 1, 200, 100);
+
+#endif
+
+#ifdef useAudio
+//playWarningToneAsync(new_level, 1000);
+#endif
+
 
        if (new_level ==5){
 
@@ -3661,7 +3910,7 @@ static int ultrasonic_update_period = 5;
 
 for (;;) {
 
-    esp_task_wdt_delete(NULL); 
+//    esp_task_wdt_delete(NULL); 
     
  //   ESP_ERROR_CHECK(esp_task_wdt_reset());
             uint32_t notification_value = 0;
@@ -3703,9 +3952,6 @@ uint32_t  min_time_between_ultrasound = 80;
 //}  uint32_t current_time = xTaskGetTickCount();
 
 
-uint32_t current_time = xTaskGetTickCount();
- last_update_time = 0;
-
   if (xSemaphoreTake(ultrasound_mutex, portMAX_DELAY) == pdTRUE) {
  ESP_LOGD(TAG, "ultrasound Got mutex .");
             alert_level_t alert_level = ALERT_VERYFAR;
@@ -3720,9 +3966,11 @@ uint32_t current_time = xTaskGetTickCount();
 uint32_t u1_read_time = xTaskGetTickCount();
             esp_err_t res = ultrasonic_measure_cm(&sensor, MAX_DISTANCE_CM, &distance);
      //   esp_err_t res = ultrasonic_measure_cm_temp_compensated(&sensor, MAX_DISTANCE_CM, &distance, temp);
-        if (res != ESP_OK)
-        {
-            printf("Error %d: ", res);
+ 
+ /*
+     if (res != ESP_OK)
+       {
+          printf("Error %d: ", res);
             switch (res)
             {
                 case ESP_ERR_ULTRASONIC_PING:
@@ -3740,25 +3988,27 @@ uint32_t u1_read_time = xTaskGetTickCount();
             }
         }
         else {
-       //     printf("Distance from sensor %d: %lu\n", 1, distance);
+
+        */
+         printf("Distance from sensor %d: %lu\n", 1, distance);
             alert_level = get_alert_level( distance, 200);
-      
+      printf("sens1 get_alert_level %lu\n", distance);
 
 
 
-//ESP_LOGI(TAG, "alert_level dist: %lu ",  distance);
+//ESP_LOGI(TAG, "update_beeper_alerts: %d ",  alert_level);
 update_beeper_alerts(alert_level, 1);
- } // no error reading
+ //} // no error reading
 
-
+//play_sine_tone(200, 1200);
               
 //ESP_LOGI(TAG, "alert_level dist: %lu ",  distance);
 //  if (distance2 <= distance) {
   //      alert_level_2 = get_alert_level( distance2, 200);
    //     update_beeper_alerts(alert_level_2, 2);
 //  } else {
-        alert_level = get_alert_level( distance, 200);
-        update_beeper_alerts(alert_level, 1);
+  //      alert_level = get_alert_level( distance, 200);
+   //     update_beeper_alerts(alert_level, 1);
 //  }
 
 
@@ -3865,7 +4115,7 @@ vTaskDelay(pdMS_TO_TICKS(400));
 } // start semaphore
 
 vTaskDelay(pdMS_TO_TICKS(100));
-esp_task_wdt_add(NULL);
+//esp_task_wdt_add(NULL);
 } // outer loop waiting for semaphore
 
 }
@@ -4116,6 +4366,7 @@ gpio_set_direction(GREEN_PIN_1, GPIO_MODE_OUTPUT);
 
 
     uint32_t last_sensor_read = 0;
+
     i2c_port_t i2c_port = I2C_NUM_1;
  
 
@@ -4156,6 +4407,7 @@ gpio_set_direction(GREEN_PIN_1, GPIO_MODE_OUTPUT);
         ESP_LOGE("MAIN", "Fatal: Failed to create Ultrasound mutex!");
         return;
     }
+     
 #endif
 
 
@@ -4235,6 +4487,22 @@ ESP_ERROR_CHECK(init_polled_input(CAM_PIN, false));
 
 
 #ifdef useVl53l5cx
+
+ // Create an I2C device handle for the VL53L0X
+  i2c_device_config_t dev_cfg = {
+      .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+      .device_address = VL53L0X_DEFAULT_I2C_ADDR, 
+      .scl_speed_hz = 100000,
+};
+  ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &dev_cfg, &dev_vl53l0x.i2c_dev));
+  ESP_LOGI(TAG, "VL53L0X device added to I2C bus");
+ 
+// Initialize the sensor via its descriptor
+  ESP_ERROR_CHECK(vl53l0x_init(&dev_vl53l0x));
+  ESP_LOGI(TAG, "VL53L0X Initialized");
+
+
+  /*
 // --- 1. Declare necessary variables ---
 uint8_t status, isAlive;
 VL53L5CX_Configuration Dev; // Your main driver struct
@@ -4285,6 +4553,7 @@ ESP_LOGI(TAG, "VL53L5CX ULD ready! (Version: %s)", VL53L5CX_API_REVISION);
         .gridLayout = gridLayout,
         .gridAlerts = gridAlerts
     };
+    */
 #endif
 
  // --- 5. Create and Launch All Tasks ---
@@ -4306,7 +4575,11 @@ ESP_LOGI(TAG, "VL53L5CX ULD ready! (Version: %s)", VL53L5CX_API_REVISION);
                     NULL,       /* Task input parameter */
                     5,          /* Priority of the task */
                     &xHandle_ultrasonic,       /* Task handle. */
-                    1);  /* Core where the task should run */
+                    0);  /* Core where the task should run */
+
+// start ultrasound immediately
+ xTaskNotify( xHandle_ultrasonic, START_BIT, eSetBits);
+
 #endif
 //ultrasonic_ranger_2
 #ifdef useUltrasound_2
@@ -4330,10 +4603,9 @@ xTaskCreatePinnedToCore(
 #ifdef useAccelerometer
 ESP_LOGI("MAIN", "Creating task for Accelerometer");
 
-    xTaskCreate(mpu9250_reader_task, "MPU Reader", 8192, mpu9250_dev_handle, 4, &xHandle_mpu);
-
-
-    xTaskCreate(data_processor_task, "Data Processor", 8192, NULL, 3, &xHandle_mpu_processor);
+ 
+xTaskCreate(mpu9250_reader_task, "MPU Reader", 8192, mpu9250_dev_handle, 3, &xHandle_mpu);
+xTaskCreate(data_processor_task, "Data Processor", 8192, NULL, 3, &xHandle_mpu_processor);
     #endif
 
 // Static storage for task parameters
@@ -4368,16 +4640,51 @@ int count = 0;
  #endif
 
 #ifdef useAudio
+initPWMaudio2 ();
+/*
+if (initPwmAudio () ){
+     ESP_LOGE(TAG, "initPwmAudio success");
+}
+*/
+
 //initAudioSystem();
 //playAudio(500, 1000);
-initAudioSystem();
-ESP_LOGI("MAIN", "initAudioSystem done");
+//initAudioSystem();
+//ESP_LOGI("MAIN", "initAudioSystem done");
 
-   alert_level_t level5 = ALERT_CLOSE;
-  if (audioQueue) {
+ //  alert_level_t level5 = ALERT_CLOSE;
+//  if (audioQueue) {
        // xQueueSend(audioQueue, &level5, pdMS_TO_TICKS(10));
  //       playWarningToneAsync(level5, 200);
+ //   }
+
+ // ESP_LOGI(TAG, "Assistive Tech Alert System Booting (ESP-IDF v5.5)...");
+  audioQueue = xQueueCreate(1, sizeof(alert_level_t));
+  if (audioQueue == NULL) {
+    ESP_LOGE(TAG, "Error creating the audioQueue  queue");
+    return;
+  }
+ // configure_sdm_audio();
+ // xTaskCreate(eventGeneratorTask, "EventGeneratorTask", 4096, NULL, 5, &eventGeneratorTaskHandle);
+ // xTaskCreate(audioTask, "AudioTask", 4096, NULL, 5, &audioTaskHandle);
+
+audio_mutex = xSemaphoreCreateMutex();
+    if (audio_mutex == NULL) {
+        ESP_LOGE("MAIN", "Fatal: Failed to create audio_mutex mutex!");
+        return;
     }
+
+ xTaskCreatePinnedToCore(
+                    audioTask,   /* Function to implement the task */
+                    "AudioTask", /* Name of the task */
+                    4000,      /* Stack size in words */
+                    NULL,       /* Task input parameter */
+                    4,          /* Priority of the task */
+                    &audioTaskHandle,       /* Task handle. */
+                    1);  /* Core where the task should run */
+
+//xTaskCreate(audioTask, "AudioTask", 4096, NULL, 5, &audioTaskHandle);
+
 
  ESP_LOGI("MAIN", "Audio started");
 //playWarningToneAsync(ALERT_CLOSE, 200);
