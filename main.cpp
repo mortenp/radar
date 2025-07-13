@@ -18,8 +18,10 @@
 #include "driver/gpio.h"
 //#include "driver/ledc.h"
 
-#include "driver/i2c_master.h"
-#include "driver/i2c_slave.h"
+#include "driver/i2c.h"
+
+//#include "driver/i2c_master.h"
+//#include "driver/i2c_slave.h"
 
  #include "esp_task_wdt.h"
  #define WATCHDOG_TIMEOUT_MSEC 20  // Reset if no feed within 10 milliseconds
@@ -40,7 +42,7 @@
 //#include "hcsr04_driver.h"
 #include <ultrasonic.h>
 
-#define TRIGGER_GPIO GPIO_NUM_17
+#define TRIGGER_GPIO GPIO_NUM_4
 #define ECHO_GPIO GPIO_NUM_16
 #define MAX_DISTANCE_CM 500 // 5m max
 
@@ -75,76 +77,34 @@
 
 #include <map>
 
+#include "esp_timer.h"
+
+
 //import std;
 
 //static bool useAcc = 0;
-#define  useAccelerometer 
-//#undef useAccelerometer
-#undef useRGBLed
-#undef useVibrator
-#define useUltrasound 
-#undef useVl53l5cx
-#undef useUartA02YYUW
-//#define useGPS
-#undef useGPS_2
-#undef useXiaoCam
-#undef  useUart 
+//#define  useAccelerometer 
+//#define useRGBLed
+
+//#define useUltrasound 
+//#define useVl53l5cx
+//#define useUartA02YYUW
+//#define useGPS00 
+//#define useGPS_2
+//#define useXiaoCam
+//#define  useUart 
 #define useVibrator2
-#define useAudio
+//#define useAudio
+//#define usePinPolling
+#define useLuna
 
-
-
- #ifdef useVibrator
-
- 
- // vibration
- //#include "vibramotor.h"
-//#include <driver/pwm.h>
-#define LEDC_GPIO 39
-//#define  LEDC_OUTPUT_IO 39
-#define SAMPLE_CNT 32
-
-
-#define LEDC_TIMER              LEDC_TIMER_0
-#define LEDC_MODE               LEDC_LOW_SPEED_MODE
-#define LEDC_OUTPUT_IO          (39) // Define the output GPIO
-#define LEDC_CHANNEL            LEDC_CHANNEL_0
-#define LEDC_DUTY_RES           LEDC_TIMER_13_BIT // Set duty resolution to 13 bits
-#define LEDC_DUTY               (4096) // Set duty to 50%. (2 ** 13) * 50% = 4096
-#define LEDC_FREQUENCY          (5) // Frequency in Hertz. Set frequency at 4 kHz
-
-
-static void example_ledc_init(void)
-{
-    // Prepare and then apply the LEDC PWM timer configuration
-    ledc_timer_config_t ledc_timer = {
-   //     .speed_mode       = LEDC_MODE,
-        .duty_resolution  = LEDC_DUTY_RES,
-        .timer_num        = LEDC_TIMER,
-        .freq_hz          = LEDC_FREQUENCY,  // Set output frequency at 4 kHz
-        .clk_cfg          = LEDC_AUTO_CLK
-    };
-    ESP_ERROR_CHECK(ledc_timer_config(&ledc_timer));
-//       .intr_type      = LEDC_INTR_DISABLE,
-
-    // Prepare and then apply the LEDC PWM channel configuration
-    ledc_channel_config_t ledc_channel = {
-         .gpio_num       = LEDC_OUTPUT_IO,
-        .speed_mode     = LEDC_MODE,
-        .channel        = LEDC_CHANNEL,
-        .timer_sel      = LEDC_TIMER,
-  
-       
-        .duty           = 0, // Set duty to 0%
-        .hpoint         = 0
-    };
-    ESP_ERROR_CHECK(ledc_channel_config(&ledc_channel));
-}
-#endif
 
  // gyro
+#ifdef useAccelerometer
  #include <mpu9250.h>
  #include <math.h> // For atan2f and sqrtf
+#endif
+
 
 // --- Alert Level Types ---
 typedef enum {
@@ -154,6 +114,7 @@ typedef enum {
     ALERT_MEDIUMFAR,
     ALERT_MEDIUM,
     ALERT_CLOSE,
+    ALERT_VERYCLOSE,
     ALERT_IMMEDIATE
 } alert_level_t; // Now this is defined
 
@@ -161,12 +122,14 @@ enum class LedColor {
     OFF, RED, ORANGE, GREEN, BLUE, YELLOW, CYAN, MAGENTA, WHITE, BLACK
 };
 
+#ifdef useAccelerometer
 // --- Data Structures ---
 typedef struct {
     float accel_x_g, accel_y_g, accel_z_g;
     float gyro_x_dps, gyro_y_dps, gyro_z_dps;
     float pitch, roll, temp_c;
 } mpu_data_t;
+#endif
 
 typedef struct {
     uint32_t frequency_hz, 
@@ -218,6 +181,10 @@ const int BIT_DEPTH = 8;       // Bit depth. 8-bit is standard for PWM audio on 
 static volatile bool audio_active = false;
 static alert_level_t current_level = ALERT_SILENT;
 
+    static uint32_t   ultraSensorDistance1;
+    static uint32_t  ultraSensorDistance2;
+
+
 //static constexpr uint32_t AUDIO_SAMPLE_RATE = 16000; // 16kHz
 //static constexpr uint32_t DURATION_MS = 500; // 500ms per tone
 //static constexpr uint32_t SAMPLES_PER_BUFFER = 128; // Optimal chunk size
@@ -232,13 +199,14 @@ static SemaphoreHandle_t audio_mutex = NULL;
 // --- NEW: Single LED State Struct and Mode Enum ---
 // ----------------------------------------------------------------
 
+#ifdef useRGBLed
 // Defines what the WS2812 LED part of the state should be doing
 typedef enum {
     LED_MODE_OFF,
     LED_MODE_SOLID,
     LED_MODE_BLINK,
 } led_mode_t;
-
+#endif
 /*
 // This single struct describes the complete desired state for ALL LEDs
 typedef struct {
@@ -259,6 +227,7 @@ typedef struct {
 // ----------------------------------------------------------------
 // --- ACTION: Replace your LED State Struct with this version ---
 // ----------------------------------------------------------------
+#ifdef useRGBLed
 struct led_state_t { // Give the struct its name at the beginning
     uint8_t r = 0, g = 0, b = 0;
     float brightness = 0.0f;
@@ -280,6 +249,7 @@ struct led_state_t { // Give the struct its name at the beginning
 
 // The handle for our queue, which will now carry this new struct
 QueueHandle_t led_state_queue;
+#endif
 
 typedef struct {
     VL53L5CX_Configuration *dev;
@@ -294,6 +264,7 @@ static const alert_config_t alert_configs[] = {
     {1000,  50,  50, "MediumFar",  LedColor::YELLOW,   3, 200, 0.6}, // ALERT_MEDIUMFAR
     {1200, 50,  80, "Medium",      LedColor::ORANGE, 3, 300, 0.7}, // ALERT_MEDIUM
     {1800, 50,  120,  "Close",     LedColor::RED,    5, 200, 0.8}, // ALERT_CLOSE
+    {1800, 50,  120,  "`Very Close",     LedColor::RED,    5, 200, 0.8},  //ALERT_VERYCLOSE
     {2500, 70, 200,  "Immediate",  LedColor::WHITE,  5, 100, 0.8}  // ALERT_IMMEDIATE
 };
 
@@ -322,6 +293,7 @@ static TaskHandle_t xHandle_vl53l5cx;
 static TaskHandle_t xHandle_vibrator;
 static TaskHandle_t xHandle_blink;
 static TaskHandle_t xHandle_GPS;
+static TaskHandle_t xHandle_luna;
 
 #ifdef useAudio
 static TaskHandle_t audioTaskHandle;
@@ -330,7 +302,9 @@ static TaskHandle_t audioTaskHandle;
 //TaskHandle_t sensorTaskHandle = NULL;
 //TaskHandle_t audioTaskHandle = NULL;
 QueueHandle_t audioAlertQueue = NULL;
-SemaphoreHandle_t g_i2c_bus_mutex = NULL;
+
+static SemaphoreHandle_t i2c_mutex = NULL;
+static i2c_master_bus_handle_t bus_handle = NULL;
 //vl53l0x_dev_t dev_vl53l0x; // Device descriptor for the sensor
 
 
@@ -347,7 +321,7 @@ SemaphoreHandle_t g_i2c_bus_mutex = NULL;
 //#define I2S_PORT            (I2S_NUM_0)
 //#define DAC_PIN             (GPIO_NUM_25)
 // --- Forward Declarations ---
-void audioTask(void *parameter);
+//void audioTask(void *parameter);
 void play_tone(float frequency, int duration_ms);
 void stop_tone();
 void configure_i2s();
@@ -397,8 +371,8 @@ uint16_t range;
 */
 
 /// UART
-//#define RXD_PIN 16
-//#define TXD_PIN 17
+#define RXD_PIN 7
+#define TXD_PIN 6
 #define UART_NUM UART_NUM_1
 #define UART_BUFFER_SIZE (1024)
 #define UART_TIMEOUT_MS 30
@@ -413,13 +387,20 @@ uint16_t range;
 #define CAM_PIN        GPIO_NUM_40
 #endif
 
+static bool useAudioAlerts = true;
+static bool useVibratorAlerts = false;
+
+#define ALERT_TYPE_PIN GPIO_NUM_39
+
+
 // configure alert distances
-int ALERT_IMMEDIATE_LIMIT = 50;
+int ALERT_IMMEDIATE_LIMIT = 40;
+int ALERT_VERYCLOSE_LIMIT  = 60;
 int ALERT_CLOSE_LIMIT  = 90;
-int ALERT_MEDIUM_LIMIT  = 120;
-int ALERT_MEDIUMFAR_LIMIT  = 160;
-int ALERT_FAR_LIMIT  = 190;
-int ALERT_VERYFAR_LIMIT  = 210;
+int ALERT_MEDIUM_LIMIT  = 110;
+int ALERT_MEDIUMFAR_LIMIT  = 140;
+int ALERT_FAR_LIMIT  = 160;
+int ALERT_VERYFAR_LIMIT  = 200;
 
 static bool indoor = false;
 static float sensor2_diff = -20.0;
@@ -492,7 +473,7 @@ void data_processor_task(void *pvParameters);
 
 #ifdef useAudio
 //void audioTask(void *pvParameters);
-bool play_sine_tone(uint32_t duration_ms, uint32_t frequency) ;
+//bool play_sine_tone(uint32_t duration_ms, uint32_t frequency, float amplitude) ;
 void audioTask(void *parameter);
 #endif
 
@@ -501,7 +482,420 @@ void vl53l5cx_reader_task(void *pvParameters);
 bool vl53l5cx_recover(VL53L5CX_Configuration *dev);
 
 
+#ifdef useLuna
 
+/*
+// Configuration
+#define TF_LUNA_ADDR 0x10
+#define TF_LUNA_CMD_LEN 5
+#define TF_LUNA_DATA_LEN 9
+#define TF_LUNA_TASK_STACK 3048
+#define TF_LUNA_TASK_PRIO 5  // Medium priority
+#define TF_LUNA_READ_DELAY_MS 200
+// I2C error: 0x103
+static const uint8_t tf_luna_command[TF_LUNA_CMD_LEN] = {0x5A, 0x05, 0x00, 0x01, 0x60};
+
+// Data structure for sharing readings
+typedef struct {
+    uint16_t distance;
+    uint16_t strength;
+    float temperature;
+} tf_luna_data_t;
+
+// Global resources
+static QueueHandle_t tf_luna_queue = NULL;
+static i2c_master_dev_handle_t tf_luna_handle;
+//extern i2c_master_bus_handle_t bus_handle;  // Your existing bus handle
+//extern SemaphoreHandle_t g_i2c_bus_mutex;   // Your existing mutex
+*/
+// TF-Luna task
+// Configuration - ADJUST THESE!
+/*
+#define I2C_PORT I2C_NUM_1
+#define I2C_SDA_GPIO GPIO_NUM_1
+#define I2C_SCL_GPIO GPIO_NUM_2
+#define TF_LUNA_ADDR 0x10
+#define TF_LUNA_CMD_LEN 5
+#define TF_LUNA_DATA_LEN 9
+#define TF_LUNA_TASK_STACK 1024 * 4
+#define TF_LUNA_TASK_PRIO 5
+#define TF_LUNA_READ_DELAY_MS 200
+*/
+
+// Configuration
+#define SLAVE_ADDRESS 0x10
+#define DATA_LENGTH 9
+#define I2C_MASTER_SCL_IO 4
+#define I2C_MASTER_SDA_IO 8
+#define I2C_MASTER_NUM I2C_NUM_1
+#define I2C_MASTER_FREQ_HZ 100000
+#define COMMAND_BUFFER {0x5A, 0x05, 0x00, 0x01, 0x60}
+
+typedef struct {
+    uint16_t distance;
+    uint16_t strength;
+    float temperature;
+} sensor_data_t;
+
+   static i2c_master_dev_handle_t tf_luna_handle = NULL;
+
+static void initialize_i2c(void) {
+
+    i2c_config_t conf = {
+        .mode = I2C_MODE_MASTER,
+        .sda_io_num = I2C_MASTER_SDA_IO,
+        .scl_io_num = I2C_MASTER_SCL_IO,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master {
+            .clk_speed = I2C_MASTER_FREQ_HZ,
+        }
+    };
+
+
+
+ //  i2c_port_t i2c_port = I2C_NUM_1;
+
+ /* 
+    i2c_master_bus_config_t i2c_mst_config = {
+        .i2c_port = I2C_MASTER_NUM,
+        .sda_io_num = GPIO_NUM_1,
+        .scl_io_num = GPIO_NUM_2,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags {
+            .enable_internal_pullup = false,
+            .allow_pd = false,
+        }
+    };
+
+ // i2c_master_bus_handle_t bus_handle;
+    ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_mst_config, &bus_handle));
+
+       // 3. Add TF-Luna device
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = SLAVE_ADDRESS,
+        .scl_speed_hz = 50000, // 100kHz standard speed
+    };
+    
+ 
+    esp_err_t ret = i2c_master_bus_add_device(bus_handle, &dev_cfg, &tf_luna_handle);
+*/
+   ESP_ERROR_CHECK(i2c_param_config(I2C_MASTER_NUM, &conf));
+   ESP_ERROR_CHECK(i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0));
+}
+
+static esp_err_t read_luna_data(sensor_data_t *data) {
+    const uint8_t command[] = COMMAND_BUFFER;
+    uint8_t response[DATA_LENGTH] = {0};
+
+    // Send command
+    esp_err_t ret = i2c_master_write_to_device(I2C_MASTER_NUM, SLAVE_ADDRESS, 
+        command, sizeof(command), pdMS_TO_TICKS(1000));
+        ESP_LOGE(TAG, "I2C write: %d", ret);
+    if (ret != ESP_OK) return ret;
+   // Read response
+    ret = i2c_master_read_from_device(I2C_MASTER_NUM, SLAVE_ADDRESS, 
+        response, DATA_LENGTH, pdMS_TO_TICKS(1000));
+         ESP_LOGE(TAG, "I2C read: %d", ret);
+    if (ret != ESP_OK) return ret;
+
+    // new driver
+    /*
+ esp_err_t ret = i2c_master_transmit(tf_luna_handle, command, sizeof(command), 1000);
+
+
+ret = i2c_master_receive(tf_luna_handle, response, DATA_LENGTH, 1000);
+ */
+
+
+ 
+    // Parse data
+    data->distance = response[2] + (response[3] << 8);
+    data->strength = response[4] + (response[5] << 8);
+    data->temperature = (response[6] + (response[7] << 8)) / 8.0f - 256.0f;
+    
+    return ESP_OK;
+}
+
+static void i2c_task(void *pvParameters) {
+    ESP_LOGI(TAG, "I2C task started");
+    sensor_data_t data;
+
+    while (1) {
+        esp_err_t ret = read_luna_data(&data);
+        
+        if (ret == ESP_OK) {
+            // Send data to logging task via queue (or print directly)
+            printf("Distance: %d cm, Strength: %d, Temperature: %.1f°C\n",
+                  data.distance, data.strength, data.temperature);
+        } else {
+            ESP_LOGE(TAG, "I2C communication failed: %d", ret);
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(100)); // 100ms delay
+    }
+}
+
+/*
+static const uint8_t tf_luna_command[TF_LUNA_CMD_LEN] = {0x5A, 0x05, 0x00, 0x01, 0x60};
+
+typedef struct {
+    uint16_t distance;
+    uint16_t strength;
+    float temperature;
+} tf_luna_data_t;
+
+static QueueHandle_t tf_luna_queue = NULL;
+//static i2c_master_bus_handle_t bus_handle = NULL;
+static i2c_master_dev_handle_t tf_luna_handle = NULL;
+//static SemaphoreHandle_t i2c_mutex = NULL;
+
+
+
+#define MAX_RETRIES 3
+esp_err_t tf_luna_read_with_retry(tf_luna_data_t *data) {
+    uint8_t rx_data[TF_LUNA_DATA_LEN];
+    esp_err_t ret;
+    int retries = 0;
+
+    while (retries < MAX_RETRIES) {
+        ret = i2c_master_transmit(tf_luna_handle, tf_luna_command, TF_LUNA_CMD_LEN, 50);
+        if (ret != ESP_OK) goto retry;
+
+        ret = i2c_master_receive(tf_luna_handle, rx_data, TF_LUNA_DATA_LEN, 50);
+        if (ret == ESP_OK) {
+                         
+                   uint32_t distance = rx_data[2] | (rx_data[3] << 8);
+                   uint32_t strength = rx_data[4] | (rx_data[5] << 8);
+                   uint32_t temperature = (rx_data[6] | (rx_data[7] << 8)) / 8.0f - 256.0f;
+                    //xQueueSend(tf_luna_queue, &data, 0);
+
+            ESP_LOGI("TF_LUNA", "retry: distance %d, strength %d, temperature %d", distance, strength, temperature);
+               
+
+                }
+            return ESP_OK;
+        
+
+retry:
+        retries++;
+        vTaskDelay(pdMS_TO_TICKS(10));
+        ESP_LOGI("TF_LUNA", "retrying %d", retries);
+    }
+    return ret;
+}
+*/
+
+/*
+static void tf_luna_task(void *arg) {
+    tf_luna_data_t data;
+    uint8_t rx_data[TF_LUNA_DATA_LEN];
+
+    while(1) {
+        if (xSemaphoreTake(i2c_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+            esp_err_t ret = i2c_master_transmit(tf_luna_handle, tf_luna_command, TF_LUNA_CMD_LEN, pdMS_TO_TICKS(50));
+            
+            if (ret == ESP_OK) {
+                ret = i2c_master_receive(tf_luna_handle, rx_data, TF_LUNA_DATA_LEN, pdMS_TO_TICKS(50));
+                
+                if (ret == ESP_OK) {
+                    data.distance = rx_data[2] | (rx_data[3] << 8);
+                    data.strength = rx_data[4] | (rx_data[5] << 8);
+                    data.temperature = (rx_data[6] | (rx_data[7] << 8)) / 8.0f - 256.0f;
+                    xQueueSend(tf_luna_queue, &data, 0);
+                }
+            }
+            
+            xSemaphoreGive(i2c_mutex);
+            
+            if (ret != ESP_OK) {
+                ESP_LOGE("TF_LUNA", "I2C error: 0x%x (%s)", ret, esp_err_to_name(ret));
+                vTaskDelay(pdMS_TO_TICKS(1000)); // Longer delay on error
+                continue;
+            }
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(TF_LUNA_READ_DELAY_MS));
+    }
+}
+*/
+
+
+/*
+esp_err_t tf_luna_init() {
+    // 1. Initialize I2C bus
+    i2c_mutex = xSemaphoreCreateMutex();
+    if (!i2c_mutex) return ESP_FAIL;
+
+
+   i2c_master_bus_config_t bus_cfg = {
+        .i2c_port = I2C_PORT,
+        .sda_io_num = I2C_SDA_GPIO,
+        .scl_io_num = I2C_SCL_GPIO,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags {
+            .enable_internal_pullup = false,
+            .allow_pd = false,
+        }
+    };
+
+    ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
+
+    // 2. Create data queue
+    tf_luna_queue = xQueueCreate(5, sizeof(tf_luna_data_t));
+    if (!tf_luna_queue) {
+        i2c_del_master_bus(bus_handle);
+        return ESP_FAIL;
+    }
+
+    // 3. Add TF-Luna device
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = TF_LUNA_ADDR,
+        .scl_speed_hz = 50000, // 100kHz standard speed
+    };
+    
+    esp_err_t ret = i2c_master_bus_add_device(bus_handle, &dev_cfg, &tf_luna_handle);
+    if (ret != ESP_OK) {
+        vQueueDelete(tf_luna_queue);
+     //   i2c_del_master_bus(bus_handle);
+        return ret;
+    } else {
+ ESP_LOGI("TF_LUNA", "i2c_master_bus_add_device success");
+    }
+
+    // 4. Create task
+    if (xTaskCreate(tf_luna_task, "tf_luna", TF_LUNA_TASK_STACK, NULL, TF_LUNA_TASK_PRIO, NULL) != pdPASS) {
+        i2c_master_bus_rm_device(tf_luna_handle);
+        vQueueDelete(tf_luna_queue);
+      //  i2c_del_master_bus(bus_handle);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+*/
+
+//#define TF_LUNA_ADDR          0x10
+#define TF_LUNA_TIMEOUT_MS    50
+#define TAG "TF-Luna"
+
+// Register addresses (from Arduino library)
+typedef enum {
+    TFL_DIST_LO = 0x00,
+    TFL_DIST_HI = 0x01,
+    TFL_FLUX_LO = 0x02,
+    TFL_FLUX_HI = 0x03,
+    TFL_TEMP_LO = 0x04,
+    TFL_TEMP_HI = 0x05,
+    TFL_TICK_LO   =       0x06,  //R Timestamp
+    TFL_TICK_HI   =        0x07,  //R
+    TFL_ERR_LO   =         0x08,  //R
+    TFL_ERR_HI   =         0x09,  //R
+    TFL_VER_REV   =        0x0A,  //R
+    TFL_VER_MIN  =         0x0B,  //R
+    TFL_VER_MAJ  =         0x0C,  //R
+} tfl_reg_t;
+
+/*
+typedef struct {
+    i2c_master_dev_handle_t handle;
+    uint16_t distance;
+    uint16_t flux;
+    int16_t temp;
+} tfluna_t;
+
+// Initialize TF-Luna
+esp_err_t tfluna_init(i2c_master_bus_handle_t bus, tfluna_t* tfl) {
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = TF_LUNA_ADDR,
+        .scl_speed_hz = 100000,  // Standard 100kHz
+    };
+    return i2c_master_bus_add_device(bus, &dev_cfg, &tfl->handle);
+}
+
+// Read register (matches Arduino's readReg)
+static esp_err_t tfluna_read_reg(tfluna_t* tfl, uint8_t reg, uint8_t* val) {
+    uint8_t reg_addr = reg;
+    esp_err_t ret = i2c_master_transmit_receive(
+        tfl->handle,
+        &reg_addr, 1,
+        val, 1,
+        pdMS_TO_TICKS(TF_LUNA_TIMEOUT_MS));
+    
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Read reg 0x%02x failed: 0x%x", reg, ret);
+    }
+    return ret;
+}
+
+// Get data (matches Arduino's getData)
+esp_err_t tfluna_get_data(tfluna_t* tfl) {
+    uint8_t data[6];
+    
+    // Read 6 contiguous registers (distance, flux, temperature)
+    for (uint8_t reg = TFL_DIST_LO; reg <= TFL_TEMP_HI; reg++) {
+ //       ESP_RETURN_ON_ERROR(
+          esp_err_t ret2 =  tfluna_read_reg(tfl, reg, &data[reg]);
+
+             if (ret2 != ESP_OK) {
+        ESP_LOGE(TAG, "Failed reading reg 0x%02x", reg);
+    }
+
+          //  TAG, "Failed reading reg 0x%02x", reg);
+        
+        vTaskDelay(pdMS_TO_TICKS(1)); // Small delay between reads
+    }
+
+    // Parse values (little-endian)
+    tfl->distance = data[0] | (data[1] << 8);
+    tfl->flux = data[2] | (data[3] << 8);
+    tfl->temp = (data[4] | (data[5] << 8)) / 8.0f - 256.0f;
+
+    // Validate signal strength (as in Arduino lib)
+    if (tfl->flux < 100) {
+        ESP_LOGW(TAG, "Signal too weak: %d", tfl->flux);
+        return ESP_ERR_INVALID_RESPONSE;
+    } else if (tfl->flux == 0xFFFF) {
+        ESP_LOGW(TAG, "Signal saturated");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    return ESP_OK;
+}
+
+// Example usage:
+void tf_luna_task(void* arg) {
+    i2c_master_bus_handle_t bus = (i2c_master_bus_handle_t)arg;
+    tfluna_t tfl;
+    
+    ESP_ERROR_CHECK(tfluna_init(bus, &tfl));
+    ESP_LOGI(TAG, "TF-Luna initialized");
+
+    while(1) {
+        esp_err_t ret = tfluna_get_data(&tfl);
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "Distance: %dcm, Flux: %d, Temp: %.1f°C", 
+                    tfl.distance, tfl.flux, tfl.temp);
+        } else {
+            ESP_LOGW(TAG, "Measurement failed (ret: 0x%x)", ret);
+        }
+        vTaskDelay(pdMS_TO_TICKS(200)); // Adjust as needed
+    }
+}
+*/
+
+
+
+
+
+
+
+#endif
 
 //void blink_task(void *pvParameters);
 // Task prototype
@@ -546,6 +940,117 @@ void watchdog_feed_task(void *pvParameters) {
     }
 }
 */
+
+
+ #define I2C_SCAN_PORT I2C_NUM_1
+#define I2C_SCAN_SDA_GPIO 1
+#define I2C_SCAN_SCL_GPIO 2
+#define I2C_SCAN_TIMEOUT_MS 100
+
+//static i2c_master_bus_handle_t bus_handle = NULL;
+//static SemaphoreHandle_t i2c_mutex = NULL;
+
+
+// Initialize I2C bus if not already initialized
+static esp_err_t init_i2c_bus() {
+    if (bus_handle == NULL) {
+        i2c_mutex = xSemaphoreCreateMutex();
+        if (i2c_mutex == NULL) {
+            ESP_LOGE(TAG, "Failed to create I2C mutex");
+            return ESP_FAIL;
+        }
+/*
+       i2c_master_bus_config_t i2c_bus_config = {
+            .i2c_port = I2C_SCAN_PORT,
+            .sda_io_num = I2C_SCAN_SDA_GPIO,
+            .scl_io_num = I2C_SCAN_SCL_GPIO,
+            .clk_source = I2C_CLK_SRC_DEFAULT,
+            .glitch_ignore_cnt = 7,
+            .flags.enable_internal_pullup = true,
+        };
+*/
+    i2c_port_t i2c_port = I2C_NUM_1;
+
+   i2c_master_bus_config_t i2c_bus_config = {
+        .i2c_port = i2c_port,
+        .sda_io_num = GPIO_NUM_1,
+        .scl_io_num = GPIO_NUM_2,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .flags {
+            .enable_internal_pullup = true,
+            .allow_pd = false,
+        }
+    };
+
+    //i2c_master_bus_handle_t bus_handle;
+    //ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_bus_config, &bus_handle));
+
+
+      //  g_i2c_bus_mutex
+
+        esp_err_t ret = i2c_new_master_bus(&i2c_bus_config, &bus_handle);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to initialize I2C bus: %s", esp_err_to_name(ret));
+            vSemaphoreDelete(i2c_mutex);
+            return ret;
+        }
+    }
+    return ESP_OK;
+}
+
+// Scan I2C bus and print found devices
+void scan_i2c_devices() {
+
+    /*
+        i2c_port_t i2c_port = I2C_NUM_1;
+
+  i2c_master_bus_handle_t bus_handle;
+ 
+   i2c_master_bus_config_t bus_cfg = {
+        .i2c_port = i2c_port,
+        .sda_io_num = GPIO_NUM_1,
+        .scl_io_num = GPIO_NUM_2,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+      //  .glitch_ignore_cnt = 7,
+        .flags {
+            .enable_internal_pullup = false,
+         //   .allow_pd = false,
+        }
+    };
+
+ */
+ /*
+    i2c_master_bus_config_t bus_cfg = {
+        .i2c_port = I2C_NUM_1,
+        .sda_io_num = GPIO_NUM_1,
+        .scl_io_num = GPIO_NUM_2,
+        .flags.enable_internal_pullup = false
+    };
+    */
+
+  //  ESP_ERROR_CHECK(i2c_new_master_bus(&bus_cfg, &bus_handle));
+
+    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+        i2c_device_config_t dev_cfg = {
+            .device_address = addr,
+            .scl_speed_hz = 100000
+        };
+        i2c_master_dev_handle_t dev_handle;
+        esp_err_t ret = i2c_master_bus_add_device(bus_handle, &dev_cfg, &dev_handle);
+        if (ret == ESP_OK) {
+            uint8_t dummy;
+            if (i2c_master_receive(dev_handle, &dummy, 1, 50) == ESP_OK) {
+                ESP_LOGI("I2C_SCAN", "Found device at 0x%02X", addr);
+            }
+            i2c_master_bus_rm_device(dev_handle);
+        } else {
+             ESP_LOGI("I2C_SCAN", "Not OK");
+        }
+    }
+    i2c_del_master_bus(bus_handle);
+}
+
 
 #ifdef useRGBLed
 /**
@@ -967,6 +1472,11 @@ static void blink_task(void *pvParameter) {
   //  ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
 
+ //    if (xSemaphoreTake(audio_mutex, portMAX_DELAY) == pdTRUE) {
+//ESP_LOGD(TAG, "blink audio Got mutex .");
+
+
+
     // Configure GPIO pin as output
  //   gpio_pad_select_gpio(BLINK_PIN);
     gpio_set_direction(blink_task_params.pin, GPIO_MODE_OUTPUT);
@@ -985,7 +1495,18 @@ static void blink_task(void *pvParameter) {
     }
     gpio_set_level(blink_task_params.pin, 0); // Final state
     vTaskDelay(pdMS_TO_TICKS(1));
-    vTaskDelete(NULL);
+
+
+ //  xSemaphoreGive(audio_mutex);
+
+//ESP_LOGD(TAG, "blink audio gave mutex .");
+vTaskDelete(NULL);
+
+//} else {
+//ESP_LOGE(TAG, "blink audio no mutex .");
+
+//}
+
 }
 
 // **Embedded Function to Initialize Blink Task**
@@ -1006,6 +1527,224 @@ TaskHandle_t xHandle_blink = NULL;
 }
 
 #ifdef useAudio
+static void play_with_param(ledc_timer_bit_t duty_resolution, uint8_t hw_ch);
+
+static void play_audio(const uint8_t *data, size_t wave_size, uint32_t rate, ledc_timer_bit_t bits, uint32_t ch);
+
+bool play_sine_tone(uint32_t duration_ms, uint32_t frequency, float amplitude);
+
+extern const uint8_t wave_array_32000_8_1[];
+extern const uint8_t wave_array_32000_8_2[];
+extern const uint8_t wave_array_32000_16_1[];
+extern const uint8_t wave_array_32000_16_2[];
+
+extern const int16_t aurora[];
+extern const int16_t aurora_slow[];
+extern const int16_t aurora_fast[];
+#include "aurora.h" // This file was generated by wav2c
+#include "aurora_slow.h" // This file was generated by wav2c
+#include "aurora_fast.h" // This file was generated by wav2c
+
+void play_wav_from_flash(alert_level_t alert_level ) {
+    ESP_LOGI(TAG, "Playing audio wav from flash memory...");
+
+ // ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+         
+
+
+    /*
+   pwm_audio_config_t pac;
+    pac.duty_resolution    = LEDC_TIMER_10_BIT;
+    pac.gpio_num_left      = LEFT_CHANNEL_GPIO;
+    pac.ledc_channel_left  = LEDC_CHANNEL_0;
+   // if (2 == hw_ch) {
+     //   pac.gpio_num_right     = RIGHT_CHANNEL_GPIO;
+   // } else {
+        pac.gpio_num_right     = -1;
+   // }
+    pac.ledc_channel_right = LEDC_CHANNEL_1;
+    pac.ledc_timer_sel     = LEDC_TIMER_0;
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 0, 0)
+    pac.tg_num             = TIMER_GROUP_0;
+    pac.timer_num          = TIMER_0;
+#endif
+    pac.ringbuf_len        = 1024 * 8;
+
+pwm_audio_init(&pac);
+
+pwm_audio_set_param(32000, (ledc_timer_bit_t) 16, 1);
+
+  pwm_audio_start();
+*/
+  switch (alert_level) {
+        case 7:   pwm_audio_set_volume(10); break;
+        case 6:   pwm_audio_set_volume(10); break;
+          case 5:    pwm_audio_set_volume(8); break;
+          case 4: pwm_audio_set_volume(6); break;
+          case 3: pwm_audio_set_volume(4); break;
+          case 2:   pwm_audio_set_volume(1); break;
+          case 1: pwm_audio_set_volume(1); break;
+          case 0:   break;
+          default:            break;
+        }
+
+
+   // Select which audio sample to play
+  //  const int16_t* audio_data;
+ //   size_t array_size_bytes;
+ 
+    // Pitch adjustment factors
+    float pitch_factor = 1.0f; // Default normal speed
+    switch(alert_level) {
+         case 7: pitch_factor = 1.5f; break;
+        case 6: pitch_factor = 1.25f; break; // Faster/higher pitch for immediate alerts
+        case 5: pitch_factor = 1.0f; break; // Slower/lower pitch for close alerts
+        case 4: pitch_factor = 0.75f; break; 
+        default: pitch_factor = 0.5f; break;
+    }
+
+
+  //  #define SAMPLE_RATE_MAX     (48000)
+//#define SAMPLE_RATE_MIN     (8000)
+
+
+    // Use the original aurora sample
+    const size_t original_samples = sizeof(aurora_slow) / sizeof(int16_t);
+    const uint32_t original_sample_rate = 32000;
+    const uint32_t target_sample_rate = original_sample_rate * pitch_factor;
+
+
+    // Set the output sample rate (this affects pitch)
+    pwm_audio_set_param(target_sample_rate, (ledc_timer_bit_t)16, 1);
+    pwm_audio_start();
+
+    // Write the original audio data (will play at modified rate)
+    size_t bytes_written;
+    pwm_audio_write((uint8_t*)aurora_slow, sizeof(aurora_slow), &bytes_written, portMAX_DELAY);
+
+    // Calculate actual duration (original duration / pitch factor)
+    float original_duration = (original_samples * 1000.0f) / original_sample_rate;
+    uint32_t actual_duration = original_duration / pitch_factor;
+    
+    
+    /*
+
+       
+    switch (alert_level) {
+        case 6:  // ALERT_IMMEDIATE
+            audio_data = aurora_fast;
+            array_size_bytes = sizeof(aurora_fast);
+            break;
+        case 5:  // ALERT_CLOSE
+            audio_data = aurora_slow;
+            array_size_bytes = sizeof(aurora_slow);
+            break;
+        default:
+            audio_data = aurora_slow;
+            array_size_bytes = sizeof(aurora_slow);
+            break;
+    }
+
+
+
+   // Write the data to the player
+    size_t bytes_written;
+    pwm_audio_write((uint8_t*)audio_data, array_size_bytes, &bytes_written, portMAX_DELAY);
+
+    // Calculate duration to wait for playback to finish
+    int num_samples = array_size_bytes / sizeof(int16_t);
+    uint32_t duration_ms = (num_samples * 1000) / 32000;  // Using actual sample rate of 32000
+    ESP_LOGI(TAG, "WAV data written. Waiting %lu ms for playback.", duration_ms);
+   // vTaskDelay(pdMS_TO_TICKS(duration_ms + 50)); // Wait for it to play + grace period
+*/
+    // Clean up
+
+ vTaskDelay(pdMS_TO_TICKS(actual_duration + 5 )); // Wait for it to play + grace period
+
+    pwm_audio_stop();
+    ESP_LOGI(TAG, "Playback finished.");
+}
+
+
+static void play_audio(const uint8_t *data, size_t wave_size, uint32_t rate, ledc_timer_bit_t bits, uint32_t ch)
+{
+
+ //     ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+       
+
+
+
+    uint32_t index = 0;
+    size_t cnt;
+    uint32_t block_w = 2048;
+    ESP_LOGI(TAG, "parameter: samplerate:%"PRIu32", bits:%"PRIu32", channel:%"PRIu32"", rate, bits, ch);
+    pwm_audio_set_param(rate, bits, ch);
+    pwm_audio_start();
+
+    while (1) {
+        if (index < wave_size) {
+            if ((wave_size - index) < block_w) {
+                block_w = wave_size - index;
+            }
+            pwm_audio_write((uint8_t*)data + index, block_w, &cnt, 1000 / portTICK_PERIOD_MS);
+            ESP_LOGD(TAG, "write [%"PRIu32"] [%d]", block_w, cnt);
+            index += cnt;
+        } else {
+            ESP_LOGI(TAG, "play completed");
+            vTaskDelay(500 / portTICK_PERIOD_MS);
+            break;
+        }
+        vTaskDelay(10 / portTICK_PERIOD_MS);
+
+
+           ESP_ERROR_CHECK(esp_task_wdt_reset());
+
+
+    }
+    pwm_audio_stop();
+}
+
+static void play_with_param(ledc_timer_bit_t duty_resolution, uint8_t hw_ch)
+{
+    pwm_audio_config_t pac;
+    pac.duty_resolution    = duty_resolution;
+    pac.gpio_num_left      = LEFT_CHANNEL_GPIO;
+    pac.ledc_channel_left  = LEDC_CHANNEL_0;
+    if (2 == hw_ch) {
+        pac.gpio_num_right     = RIGHT_CHANNEL_GPIO;
+    } else {
+        pac.gpio_num_right     = -1;
+    }
+    pac.ledc_channel_right = LEDC_CHANNEL_1;
+    pac.ledc_timer_sel     = LEDC_TIMER_0;
+#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 0, 0)
+    pac.tg_num             = TIMER_GROUP_0;
+    pac.timer_num          = TIMER_0;
+#endif
+    pac.ringbuf_len        = 1024 * 8;
+
+pwm_audio_init(&pac);
+
+    ESP_LOGI(TAG, "\n------------------------------");
+    ESP_LOGI(TAG, "hw info: resolution: %dbit, ch: %d", duty_resolution, hw_ch);
+ //   pwm_audio_set_volume(8);
+ //   play_audio(wave_array_32000_8_1, 64000, 32000, LEDC_TIMER_8_BIT, 1);
+  //  pwm_audio_set_volume(8);
+ //   play_audio(wave_array_32000_8_2, 128000, 32000, LEDC_TIMER_8_BIT, 2);
+    pwm_audio_set_volume(8);
+    ESP_LOGI(TAG, "vol 8");
+    play_audio(wave_array_32000_16_1, 128000, 32000, (ledc_timer_bit_t) 16, 1);
+    play_audio(wave_array_32000_16_1, 128000, 32000, (ledc_timer_bit_t) 16, 2);
+    pwm_audio_set_volume(15);
+    ESP_LOGI(TAG, "vol 15");
+      play_audio(wave_array_32000_16_2, 256000, 32000, (ledc_timer_bit_t) 16, 1);
+    play_audio(wave_array_32000_16_2, 256000, 32000, (ledc_timer_bit_t) 16, 2);
+
+pwm_audio_deinit();
+
+    ESP_LOGI(TAG, "------------------------------\n");
+}
+
 
 /**
  * @brief Generates and plays a sine wave tone for a given frequency and duration.
@@ -1017,7 +1756,30 @@ TaskHandle_t xHandle_blink = NULL;
  * @param duration_ms The duration of the tone in milliseconds.
  * @param frequency The frequency of the tone in Hz.
  */
-bool play_sine_tone(uint32_t duration_ms, uint32_t frequency) {
+bool play_sine_tone(uint32_t duration_ms, uint32_t frequency, float amplitude) {
+
+//play_wav_from_flash();
+
+ //play_with_param(LEDC_TIMER_8_BIT, 1);
+ //   play_with_param(LEDC_TIMER_10_BIT, 1);
+ // //  play_with_param(LEDC_TIMER_13_BIT, 1);
+
+  //   play_with_param(LEDC_TIMER_8_BIT, 2);
+  //  play_with_param(LEDC_TIMER_10_BIT, 2);
+ ////   play_with_param(LEDC_TIMER_13_BIT, 2);
+
+//return true;
+
+uint32_t sample_rate_2 = 32000;
+
+       // --- Input Validation ---
+    // Clamp amplitude to the valid range [0.0, 1.0] to prevent distortion/wrap-around.
+    if (amplitude > 1.0f) {
+        amplitude = 1.0f;
+    }
+    if (amplitude < 0.0f) {
+        amplitude = 0.0f;
+    }
 
     if (frequency == 0) {
         // A frequency of 0 is silence, we can just delay.
@@ -1030,10 +1792,26 @@ if (xSemaphoreTake(audio_mutex, portMAX_DELAY) == pdTRUE) {
  ESP_LOGD(TAG, "audio Got mutex .");
 
 
-    ESP_LOGI(TAG, "play_sine_tone tone: %lu Hz, %lu ms", frequency, duration_ms);
+/*
+if (ultraSensorDistance1 > 5 && ultraSensorDistance1 < 200){
+double slope = 1.0 * (400 - 1000) / (300 - 5);
+frequency = 400 + slope * (ultraSensorDistance1 - 5);
+}
+*/
+
+//output = (output_end - output_start)/(input_end - input_start) *( input - input_start) + output_start;
+//if (ultraSensorDistance1 > 5 && ultraSensorDistance1 < 300){
+//int frequency = (1000 - 400)/(300 - 5) *( ultraSensorDistance1 - 5) + 400;
+//}
+ // Distance from sensors 1:5 2:193
+ //frequency = ultraSensorDistance1
+ //ultraSensorDistance2
+    ESP_LOGI(TAG, "Playing tone: %lu Hz, %lu ms, Amplitude: %.2f", frequency, duration_ms, amplitude);
+
+  //  ESP_LOGI(TAG, "play_sine_tone tone: %lu Hz, %lu ms", frequency, duration_ms);
 
     // 1. Calculate the total number of samples needed
-    uint32_t total_samples = (SAMPLE_RATE * duration_ms) / 1000;
+    uint32_t total_samples = (sample_rate_2 * duration_ms) / 1000;
 
     // 2. Allocate memory for the audio buffer on the heap
     // We use uint8_t because we specified an 8-bit depth
@@ -1045,6 +1823,41 @@ if (xSemaphoreTake(audio_mutex, portMAX_DELAY) == pdTRUE) {
         return false;
     }
 
+        // 3. Generate the sine wave samples with volume control
+    // The maximum amplitude for an 8-bit signal is 127.5. We scale this by our parameter.
+//int volume = 15 - amplitude * 15;
+int volume =  amplitude * 12;
+
+pwm_audio_set_volume(volume);
+
+ESP_LOGI(TAG, "Volume: %d ", volume);
+
+    float max_amplitude = 127.5f * amplitude;
+
+        for (uint32_t i = 0; i < total_samples; ++i) {
+        double angle = 2.0 * M_PI * frequency * i / SAMPLE_RATE;
+        // The oscillating part is now scaled by our desired amplitude
+     //   sine_wave_buffer[i] = (uint8_t)(127.5 + max_amplitude * sin(angle));
+
+         sine_wave_buffer[i] = (uint8_t)(127.5 + 127.5 * sin(angle));
+
+    }
+
+
+/*
+int8_t volume = 5; // amplitude * 16;
+pwm_audio_set_volume(volume);
+//- 16 to 16
+ 
+//if (i % 50 == 0){
+//    volume--;
+   // pwm_audio_set_volume(volume);
+//}
+int divider = total_samples/100;
+int halfway = total_samples/4;
+divider = halfway/10;
+
+
     // 3. Generate the sine wave samples
     for (uint32_t i = 0; i < total_samples; ++i) {
         // The formula for a sine wave is: Amplitude * sin(2 * PI * frequency * time)
@@ -1052,8 +1865,33 @@ if (xSemaphoreTake(audio_mutex, portMAX_DELAY) == pdTRUE) {
         // Amplitude for 8-bit audio is 127.5. We add 127.5 to shift the
         // wave (-1 to +1) to the unsigned 8-bit range (0 to 255).
         double angle = 2.0 * M_PI * frequency * i / SAMPLE_RATE;
-        sine_wave_buffer[i] = (uint8_t)(127.5 + 127.5 * sin(angle));
+    ////     ESP_LOGI(TAG, "Sample: %d of %d", i, total_samples);
+// 1600 samples
+
+if (i % (divider) == 0 && i > halfway && volume > 1 ){
+    volume--;
+ //   pwm_audio_set_volume(volume);
+     ESP_LOGI(TAG, "- volume at %d: %d ", i, volume);
+}
+
+if (i % (divider) == 0 && i < halfway && volume < 15){
+    volume++;
+   // pwm_audio_set_volume(volume);
+     ESP_LOGI(TAG, "+ volume at %d: %d ", i, volume);
+}
+
+ pwm_audio_set_volume(volume);
+ */
+/*
+  for (int i = 20; i >= 0; --i) {
+            float current_amplitude = i / 20.0f; // Ramps from 1.0 down to 0.0
+            play_sine_tone(600, 50, current_amplitude);
+        }
+
+
+      sine_wave_buffer[i] = (uint8_t)(127.5 + 127.5 * sin(angle));
     }
+*/
 
     // 4. Configure and start the PWM audio player
  //   pwm_audio_config_t config = {
@@ -1088,6 +1926,8 @@ if (xSemaphoreTake(audio_mutex, portMAX_DELAY) == pdTRUE) {
 
     ESP_LOGI(TAG, "Playback finished.");
 
+
+
 xSemaphoreGive(audio_mutex);
 ESP_LOGD(TAG, "audio gave mutex .");
 
@@ -1105,6 +1945,11 @@ ESP_LOGD(TAG, "no audio  mutex .");
 
 
 bool initPWMaudio2 (){
+
+  //  return true;
+    
+    // pac.ringbuf_len        = 1024 * 8;
+  //  return true;
     // Configure PWM audio
         pwm_audio_config_t pac = {
         .gpio_num_left = LEFT_CHANNEL_GPIO,
@@ -1112,8 +1957,8 @@ bool initPWMaudio2 (){
         .ledc_channel_left = LEDC_CHANNEL_0,
         .ledc_channel_right = LEDC_CHANNEL_1,
         .ledc_timer_sel = LEDC_TIMER_0,
-        .duty_resolution = LEDC_TIMER_8_BIT,
-        .ringbuf_len = RINGBUF_SIZE
+        .duty_resolution = LEDC_TIMER_10_BIT,
+        .ringbuf_len = 1024 * 8
     };
 
     // Initialize audio system
@@ -1121,6 +1966,12 @@ bool initPWMaudio2 (){
        return false;
       ESP_LOGW(TAG, "pwm_audio_init error");
     }
+
+
+  //  pwm_audio_set_param(32000, (ledc_timer_bit_t) 10, 1);
+
+pwm_audio_set_param(32000, (ledc_timer_bit_t) 16, 1);
+
   pwm_audio_start();
   return true;
 }
@@ -1130,6 +1981,8 @@ bool playAudio(uint32_t duration_ms, uint32_t frequency_hz) {
     if (frequency_hz == 0 || duration_ms == 0) {
         return false;
     }
+
+ // ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
 
 ESP_LOGI(TAG, "playAudio %d %d", duration_ms, frequency_hz);
@@ -1177,6 +2030,10 @@ ESP_LOGI(TAG, "playAudio %d %d", duration_ms, frequency_hz);
 
     // Playback loop
     while (samples_played < total_samples) {
+
+
+   //        ESP_ERROR_CHECK(esp_task_wdt_reset());
+
         const uint32_t buffer_pos = (samples_played * 2) % data_buffer.size();
         const uint32_t remaining_in_buffer = data_buffer.size() - buffer_pos;
         const uint32_t samples_to_play = std::min({
@@ -1236,7 +2093,12 @@ void audioTask(void *parameter) {
   alert_level_t last_played_level = (alert_level_t)-1;
 
   ESP_LOGI(TAG, "Audio Task started");
+
+//ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+
+   esp_task_wdt_delete(NULL); 
   
+
   for (;;) {
 
 /*
@@ -1247,28 +2109,85 @@ if (current_time - last_update_time > alert_update_period ) {
 last_update_time = current_time;
 }
 */
+//ESP_ERROR_CHECK(esp_task_wdt_reset());
 
-
-    if (xQueueReceive(audioQueue, &received_alert_level, portMAX_DELAY) == pdTRUE) {
+   if (xQueueReceive(audioQueue, &received_alert_level, portMAX_DELAY) == pdTRUE) {
       //if (received_alert_level != last_played_level) {
         ESP_LOGI(TAG, "Audio task: Playing alert for level %d", received_alert_level);
         last_played_level = received_alert_level;
 
-        switch (received_alert_level) {
+
+if (xSemaphoreTake(audio_mutex, portMAX_DELAY) == pdTRUE) {
+ 
+//ESP_ERROR_CHECK(esp_task_wdt_reset());
+
+ play_wav_from_flash(received_alert_level ) ;
+
+
+ //       switch (received_alert_level) {
  //   play_sine_tone
 // 
-     case ALERT_VERYFAR:   play_sine_tone(100.0, 200); break;
-          case ALERT_FAR:    play_sine_tone(100.0, 300); break;
-          case ALERT_MEDIUMFAR: play_sine_tone(100.0, 500); break;
-          case ALERT_MEDIUM: play_sine_tone(100.0, 600); break;
-          case ALERT_CLOSE:   play_sine_tone(100.0, 700); break;
-          case ALERT_IMMEDIATE: play_sine_tone(100, 800); 
+//play_sine_tone(440, 1000, 1.0f);
+
+
+//play_wav_from_flash
+
+/*
+     case ALERT_VERYFAR:   play_wav_from_flash(received_alert_level); break;
+          case ALERT_FAR:    play_wav_from_flash(received_alert_level); break;
+          case ALERT_MEDIUMFAR: play_wav_from_flash(received_alert_level); break;
+          case ALERT_MEDIUM: play_wav_from_flash(received_alert_level); break;
+          case ALERT_CLOSE:   play_wav_from_flash(received_alert_level); break;
+          case ALERT_IMMEDIATE: play_wav_from_flash(received_alert_level); 
+                    break;
+          case ALERT_SILENT:   break;
+          default:            break;
+        }
+*/
+// bool play_sine_tone(uint32_t duration_ms, uint32_t frequency, float amplitude)
+/*
+     case ALERT_VERYFAR:   play_sine_tone(100.0, 220, 0.9f); break;
+          case ALERT_FAR:    play_sine_tone(100.0, 440, 0.7f); break;
+          case ALERT_MEDIUMFAR: play_sine_tone(300.0, 466, 0.6f); break;
+          case ALERT_MEDIUM: play_sine_tone(200.0, 587, 0.5f); break;
+          case ALERT_CLOSE:   play_sine_tone(150.0, 659, 0.6f); break;
+          case ALERT_IMMEDIATE: play_sine_tone(100, 880, 1.0f); 
+          // ramping
+   // for (int i = 20; i >= 0; --i) {
+   //         float current_amplitude = i / 20.0f; // Ramps from 1.0 down to 0.0
+   //         play_sine_tone(100, 880, current_amplitude);
+    //    }
+
                                // vTaskDelay(pdMS_TO_TICKS(1));
                                 //play_sine_tone(100, 600); 
           break;
           case ALERT_SILENT:   break;
           default:            break;
-        }
+*/        
+
+/*
+     case ALERT_VERYFAR:   play_sine_tone(100.0, 220, 0.9f); break;
+          case ALERT_FAR:    play_sine_tone(100.0, 440, 0.7f); break;
+          case ALERT_MEDIUMFAR: play_sine_tone(300.0, 466, 0.6f); break;
+          case ALERT_MEDIUM: play_sine_tone(200.0, 587, 0.5f); break;
+          case ALERT_CLOSE:   play_sine_tone(150.0, 659, 0.6f); break;
+          case ALERT_IMMEDIATE: play_sine_tone(100, 880, 1.0f); 
+          // ramping
+   // for (int i = 20; i >= 0; --i) {
+   //         float current_amplitude = i / 20.0f; // Ramps from 1.0 down to 0.0
+   //         play_sine_tone(100, 880, current_amplitude);
+    //    }
+
+                               // vTaskDelay(pdMS_TO_TICKS(1));
+                                //play_sine_tone(100, 600); 
+          break;
+          case ALERT_SILENT:   break;
+          default:            break;
+        
+*/
+
+
+      
 /*
           case ALERT_VERYFAR:   playAudio(100.0, 400); break;
           case ALERT_FAR:    playAudio(100.0, 400); break;
@@ -1280,155 +2199,27 @@ last_update_time = current_time;
           default:            break;
       }
           */
-    //}
-  }
+ //   }
 
-   vTaskDelay(pdMS_TO_TICKS(30));
+   xSemaphoreGive(audio_mutex);
+} else {
+ESP_LOGE(TAG, "No audio_mutex available");
 
 }
 
-}
 
+ } // got queue message
 
-/*
-void audioTask(void *parameter) {
-  alert_level_t received_alert_level;
-  alert_level_t last_played_level = ALERT_NONE;
+   vTaskDelay(pdMS_TO_TICKS(10));
 
-  ESP_LOGI(TAG, "Audio Task started");
-  configure_i2s();
+} // loop
+
   
-  for (;;) {
-    if (xQueueReceive(audioAlertQueue, &received_alert_level, portMAX_DELAY) == pdTRUE) {
-      if (received_alert_level != last_played_level) {
-        ESP_LOGI(TAG, "Audio task: New alert level: %d", received_alert_level);
-        last_played_level = received_alert_level;
-
-       
-        switch (received_alert_level) {
-          case ALERT_VERYFAR:   play_tone(300.0, 500); break;
-          case ALERT_FAR:    play_tone(440.0, 500); break;
-          case ALERT_MEDIUMFAR: play_tone(500.0, 500); break;
-          case ALERT_MEDIUM: play_tone(660.0, 500); break;
-          case ALERT_CLOSE:   play_tone(880.0, 500); break;
-          case ALERT_IMMEDIATE:   play_tone(1000.0, 500); break;
-          case ALERT_SILENT:  stop_tone(); break;
-          default:           stop_tone(); break;
-        }
-      }
-    }
-  }
+  esp_task_wdt_add(NULL);
 }
-*/
 
-/*
-void play_tone(float frequency, int duration_ms) {
-    int samples_to_play = (I2S_SAMPLE_RATE * duration_ms) / 1000;
-    int samples_per_cycle = roundf((float)I2S_SAMPLE_RATE / frequency);
 
-    size_t bytes_written = 0;
-    stop_tone();
 
-    // Allocate memory for one cycle
-    uint8_t* single_cycle_buffer = (uint8_t*)malloc(samples_per_cycle);
-    if (!single_cycle_buffer) {
-        ESP_LOGE(TAG, "Failed to allocate memory for tone buffer");
-        return;
-    }
-
-    for(int i = 0; i < samples_per_cycle; i++) {
-        single_cycle_buffer[i] = 127 + 127 * sin(2 * M_PI * i / samples_per_cycle);
-    }
-    
-    int total_samples_written = 0;
-    while (total_samples_written < samples_to_play) {
-      i2s_write(I2S_PORT, single_cycle_buffer, samples_per_cycle, &bytes_written, portMAX_DELAY);
-      if (bytes_written > 0) {
-        total_samples_written += bytes_written;
-      } else {
-        break;
-      }
-    }
-    free(single_cycle_buffer);
-}
-*/
-
-/*
-void stop_tone() {
-    i2s_zero_dma_buffer(I2S_PORT);
-}
-*/
-
-/*
-void audioTask(void *pvParameter) {
-    // Register with watchdog
-    esp_task_wdt_add(NULL);
-    
-    while (1) {
-        // 1. Handle emergency stop
-        if (audio_state.stop_requested) {
-            pwm_audio_stop();
-            audio_state.is_playing = false;
-            audio_state.stop_requested = false;
-            continue;
-        }
-        
-        // 2. Process incoming commands
-        alert_level_t new_level;
-        if (xQueueReceive(audioQueue, &new_level, 0) == pdTRUE) {
-            if (new_level == ALERT_SILENT) {
-                audio_state.stop_requested = true;
-            } else if (audio_state.is_initialized) {
-                audio_state.current_level = new_level;
-                audio_state.duration_ms = getAlertDuration(new_level);
-                audio_state.total_samples = (SAMPLE_RATE * audio_state.duration_ms) / 1000;
-                audio_state.played_samples = 0;
-                audio_state.is_playing = true;
-                pwm_audio_start();
-            }
-        }
-        
-        // 3. Handle audio generation
-        if (audio_state.is_playing && audio_state.played_samples < audio_state.total_samples) {
-            int8_t samples[128];
-            size_t remaining = audio_state.total_samples - audio_state.played_samples;
-            //size_t to_generate = MIN(sizeof(samples), remaining);
-            
-            size_t to_generate = std::min(sizeof(samples), (unsigned int) remaining);
-            generateWaveform(audio_state.current_level, samples, to_generate);
-            
-            size_t written;
-            esp_err_t err = pwm_audio_write(
-                reinterpret_cast<uint8_t*>(samples),
-                to_generate,
-                &written,
-                pdMS_TO_TICKS(10)
-            );
-            
-            if (err == ESP_OK) {
-                audio_state.played_samples += written;
-            } else {
-                ESP_LOGE("AUDIO", "Write error: 0x%x", err);
-                audio_state.stop_requested = true;
-            }
-            
-            // Check for completion
-            if (audio_state.played_samples >= audio_state.total_samples) {
-                audio_state.is_playing = false;
-                pwm_audio_stop();
-            }
-        }
-        
-        // 4. Watchdog maintenance
-        if (xTaskGetTickCount() - audio_state.last_wdt_reset > pdMS_TO_TICKS(1000)) {
-            esp_task_wdt_reset();
-            audio_state.last_wdt_reset = xTaskGetTickCount();
-        }
-        
-        vTaskDelay(pdMS_TO_TICKS(1));
-    }
-}
-*/
 
 
 void playWarningToneAsync(alert_level_t level, uint32_t duration_ms) {
@@ -1443,6 +2234,7 @@ void playWarningToneAsync(alert_level_t level, uint32_t duration_ms) {
    vTaskDelay(pdMS_TO_TICKS(100));
 
 }
+
 /*
 // Updated alert handler using async playback
 void update_beeper_alerts(alert_level_t new_level) {
@@ -1498,168 +2290,13 @@ static void check_leak(size_t before_free, size_t after_free, const char *type)
 }
 */
 
-
-
-
-// Map your existing alert levels to specific warning sounds
-/*
-
-void playWarningTone(alert_level_t level, uint32_t duration_ms) {
-    // Parameter validation
-    if (level == ALERT_SILENT || duration_ms == 0) {
-        return;
-    }
-
-    const uint32_t sample_rate = 48000;
-    std::vector<int8_t> data_buffer;
-    uint32_t base_freq;
-
-    // Generate different waveforms based on alert level
-    switch (level) {
-        case ALERT_VERYFAR: {
-            // Gentle 600Hz sine wave with slow pulsation
-            base_freq = 600;
-            uint32_t size = sample_rate / 2; // 0.5s buffer for pulsation
-            data_buffer.resize(size * 2);
-            for (uint32_t i = 0; i < size; i++) {
-                float phase = 6.283185307179f * i * base_freq / sample_rate;
-                float envelope = 0.3f + 0.2f * sinf(6.283185307179f * i / size);
-                int8_t sample = static_cast<int8_t>(50.0f * envelope * sinf(phase));
-                data_buffer[i*2] = sample;
-                data_buffer[i*2+1] = sample;
-            }
-            break;
-        }
-
-        case ALERT_FAR: {
-            // Steady 800Hz sine wave with gentle stereo panning
-            base_freq = 800;
-            uint32_t size = sample_rate / base_freq;
-            data_buffer.resize(size * 2);
-            for (uint32_t i = 0; i < size; i++) {
-                float phase = 6.283185307179f * i / size;
-                int8_t sample = static_cast<int8_t>(70.0f * sinf(phase));
-                data_buffer[i*2] = static_cast<int8_t>(sample * 0.8f); // Left quieter
-                data_buffer[i*2+1] = sample;                           // Right louder
-            }
-            break;
-        }
-
-        case ALERT_MEDIUMFAR: {
-            // Dual-tone (800Hz + 1200Hz) for better recognition
-            base_freq = 800;
-            uint32_t size = sample_rate / base_freq;
-            data_buffer.resize(size * 2);
-            for (uint32_t i = 0; i < size; i++) {
-                float phase1 = 6.283185307179f * i / size;
-                float phase2 = 6.283185307179f * i * 1.5f / size; // 1.5x frequency
-                int8_t sample = static_cast<int8_t>(50.0f * (sinf(phase1) + 0.6f * sinf(phase2)));
-                data_buffer[i*2] = sample;
-                data_buffer[i*2+1] = sample;
-            }
-            break;
-        }
-
-        case ALERT_MEDIUM: {
-            // Sawtooth wave at 1000Hz for increased urgency
-            base_freq = 900;
-            uint32_t size = sample_rate / base_freq;
-            data_buffer.resize(size * 2);
-            for (uint32_t i = 0; i < size; i++) {
-                float position = static_cast<float>(i) / size;
-                int8_t sample = static_cast<int8_t>(90.0f * (2.0f * position - 1.0f));
-                data_buffer[i*2] = sample;
-                data_buffer[i*2+1] = -sample; // Anti-phase for stereo width
-            }
-            break;
-        }
-
-        case ALERT_CLOSE: {
-            // Pulsed square wave at 1200Hz (4 pulses per second)
-            base_freq = 1000;
-            uint32_t pulse_rate = 4;
-            uint32_t size = sample_rate / pulse_rate;
-            data_buffer.resize(size * 2);
-            uint32_t samples_per_tone = sample_rate / base_freq;
-            
-            for (uint32_t i = 0; i < size; i++) {
-                uint32_t tone_pos = i % samples_per_tone;
-                bool pulse_active = (i / samples_per_tone) % 2 == 0;
-                int8_t sample = pulse_active ? (tone_pos < samples_per_tone/2 ? 100 : -100) : 0;
-                data_buffer[i*2] = sample;
-                data_buffer[i*2+1] = sample;
-            }
-            break;
-        }
-
-        case ALERT_IMMEDIATE: {
-            // Aggressive band-limited square wave with harmonics and stereo panning
-            base_freq = 1200;
-            uint32_t size = sample_rate / base_freq;
-            data_buffer.resize(size * 2);
-            for (uint32_t i = 0; i < size; i++) {
-                float phase = 6.283185307179f * i / size;
-                // Band-limited square wave approximation
-                float sample = 0.6f * sinf(phase);
-                sample += 0.3f * sinf(3.0f * phase);
-                sample += 0.1f * sinf(5.0f * phase);
-                int8_t left = static_cast<int8_t>(120.0f * sample);
-                int8_t right = static_cast<int8_t>(120.0f * -sample); // Opposite phase
-                data_buffer[i*2] = left;
-                data_buffer[i*2+1] = right;
-            }
-            break;
-        }
-
-        default:
-            return;
-    }
-
-    // Audio hardware initialization (same as previous implementation)
-            pwm_audio_config_t pac = {
-        .gpio_num_left = LEFT_CHANNEL_GPIO,
-        .gpio_num_right = RIGHT_CHANNEL_GPIO,
-        .ledc_channel_left = LEDC_CHANNEL_0,
-        
-        .ledc_channel_right = LEDC_CHANNEL_1,
-        .ledc_timer_sel = LEDC_TIMER_0,
-#if ESP_IDF_VERSION < ESP_IDF_VERSION_VAL(5, 0, 0)
-        .tg_num = TIMER_GROUP_0,
-        .timer_num = TIMER_0,
+// #ifdef useAudio
 #endif
-        .duty_resolution = LEDC_TIMER_8_BIT,
-        .ringbuf_len = 1024 * 8
-        };
 
 
-    if (pwm_audio_init(&pac) != ESP_OK) return;
-    pwm_audio_set_param(sample_rate, LEDC_TIMER_8_BIT, 2);
-    pwm_audio_start();
-
-    // Playback logic
-    const uint32_t total_samples = (sample_rate * duration_ms) / 1000;
-    uint32_t samples_played = 0;
-    const uint32_t block_size = 256;
-
-    while (samples_played < total_samples) {
-        uint32_t buffer_pos = (samples_played * 2) % data_buffer.size();
-        uint32_t remaining = std::min(data_buffer.size() - buffer_pos, (total_samples - samples_played) * 2);
-        uint32_t to_write = std::min(remaining, block_size);
-
-        size_t bytes_written = 0;
-        pwm_audio_write(reinterpret_cast<uint8_t*>(data_buffer.data()) + buffer_pos,
-                       to_write, &bytes_written, 10 / portTICK_PERIOD_MS);
-        samples_played += bytes_written / 2;
-    }
-
-    pwm_audio_stop();
-    pwm_audio_deinit();
-}
-*/
-
-    #endif
 ///// vibrator
 
+#ifdef useVibrator2
 typedef struct {
     gpio_num_t pin;
     uint8_t times;
@@ -1669,7 +2306,7 @@ typedef struct {
 
 // Static storage for task parameters
 static vibrator_task_params_t vibrator_task_params;
-
+#endif
 
 void resetPins (){
 gpio_set_level(RED_PIN, 0); 
@@ -1692,10 +2329,19 @@ static void vibrator_task(void *pvParameter) {
 
 //ESP_LOGI("BLINK", "blink_task %d %d %d", blink_task_params.pin,blink_task_params.times, blink_task_params.interval_ms );
 //ESP_LOGI("VIBRA", "vibrator_task %d %d %d", vibrator_task_params.pin,vibrator_task_params.times, vibrator_task_params.interval_ms );
+//if (xSemaphoreTake(audio_mutex, portMAX_DELAY) == pdTRUE) {
+ //ESP_LOGD(TAG, "vibr audio Got mutex .");
 
 
+ //  ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+  
     // Blink 'times' times with 'interval_ms' between blinks
     for (uint8_t i = 0; i < vibrator_task_params.times; i++) {
+
+
+ //          ESP_ERROR_CHECK(esp_task_wdt_reset());
+
+
         gpio_set_level(vibrator_task_params.pin, 1);
         vTaskDelay(pdMS_TO_TICKS(vibrator_task_params.length_ms));
         gpio_set_level(vibrator_task_params.pin, 0);
@@ -1703,7 +2349,14 @@ static void vibrator_task(void *pvParameter) {
       //  vTaskDelay(pdMS_TO_TICKS(vibrator_task_params.interval_ms - (vibrator_task_params.interval_ms / 2)));
     }
     gpio_set_level(vibrator_task_params.pin, 0); // Final state
+
+
+ //   xSemaphoreGive(audio_mutex);
+//ESP_LOGD(TAG, "vibr audio gave mutex .");
+
     vTaskDelete(NULL);
+//}
+
 }
 
 static void vibrator_task_init( gpio_num_t pin, uint8_t times, uint32_t length_ms, uint32_t interval_ms2) {
@@ -1770,37 +2423,42 @@ void mpu9250_reader_task(void *pvParameters)
     uint8_t raw_data[14]; // Buffer for all accel, temp, and gyro data
     mpu_data_t sensor_data;
 
-    uint32_t last_update_time = xTaskGetTickCount();
+  //  uint32_t last_update_time = xTaskGetTickCount();
+    uint32_t last_update_time = 0;
+
 
     ESP_LOGI("MPU9250_TASK", "Fusion task started.");
    vTaskDelay(pdMS_TO_TICKS(100));
 static int mpu9250_update_period = 50;
     while (1)
     {
-         vTaskDelay(pdMS_TO_TICKS(200));
 
-  ESP_ERROR_CHECK(esp_task_wdt_reset());
+          ESP_ERROR_CHECK(esp_task_wdt_reset());
+
+        
+
+
 
         uint32_t current_time = xTaskGetTickCount();
         float dt = (float)(current_time - last_update_time) / (float)configTICK_RATE_HZ;
         
-        last_update_time = current_time;
+    //    last_update_time = current_time;
  //   ESP_LOGI("MPU9250_TASK", "mpu9250 check update cur %d last %d",  current_time, last_update_time );
 
  //  last_update_time = 0;
-//if (current_time - last_update_time > mpu9250_update_period ) {
-   //   last_update_time = current_time;
+if (current_time - last_update_time > mpu9250_update_period ) {
+   last_update_time = current_time;
   
  ESP_LOGD("MUTEX2", "mpu9250 Waiting for g_i2c_bus mutex...");
  
         ESP_LOGD("MPU9250_TASK", "mpu9250 updating");
 
-           if (xSemaphoreTake(g_i2c_bus_mutex, portMAX_DELAY) == pdTRUE) {
+           if (xSemaphoreTake(i2c_mutex, portMAX_DELAY) == pdTRUE) {
 
 mpu_hasMutex = true;
 
 
-  ESP_LOGD("MUTEX2", "mpu9250 g_i2c_bus Mutex taken.");
+  ESP_LOGD("MUTEX2", "mpu9250 i2c_mutex Mutex taken.");
 
   ESP_LOGD("MPU9250_TASK", "Doing mi2c_master_transmit_receive");
 
@@ -1857,6 +2515,7 @@ mpu_hasMutex = true;
             xQueueSend(mpu_data_queue, &sensor_data, 0);
 
         } else {
+            xSemaphoreGive(i2c_mutex);
             ESP_LOGE("MPU9250_TASK", "Failed to read sensor data: %s", esp_err_to_name(err));
         }
 
@@ -1884,15 +2543,18 @@ mpu_hasMutex = true;
 
                
 //if (mpu_hasMutex){
-            xSemaphoreGive(g_i2c_bus_mutex);
+            xSemaphoreGive(i2c_mutex);
             mpu_hasMutex = false;
               ESP_LOGD("MUTEX2", "mpu9250 g_i2c_bus Mutex given.");
 //}
       
     }
 
-//} // mpu9250_update_period
-  
+} // mpu9250_update_period
+
+
+//xSemaphoreGive(g_i2c_bus_mutex);
+   vTaskDelay(pdMS_TO_TICKS(100));
 }
     
      
@@ -1908,7 +2570,9 @@ mpu_hasMutex = true;
 void data_processor_task(void *pvParameters)
 {
 
-        ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+      //  ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+  // esp_task_wdt_delete(NULL); 
+  
 
 
     mpu_data_t received_data;
@@ -1916,13 +2580,16 @@ void data_processor_task(void *pvParameters)
 
     while (1)
     {
+
+ //         ESP_ERROR_CHECK(esp_task_wdt_reset());
+
         // Wait indefinitely until an item is available on the queue.
         if (xQueueReceive(mpu_data_queue, &received_data, portMAX_DELAY) == pdPASS)
         {
 
 
-           ESP_ERROR_CHECK(esp_task_wdt_reset());
-
+       
+// ESP_ERROR_CHECK(esp_task_wdt_reset());
 
  ESP_LOGD("PROCESSOR_TASK", "received data.");
 /*
@@ -2089,6 +2756,9 @@ last_roll = received_data.roll;
 
 
     } // while 1
+  //     esp_task_wdt_delete(NULL); 
+  
+//  esp_task_wdt_add(NULL);
 }
 
 #endif
@@ -2406,17 +3076,21 @@ ALERT_VERYFAR_LIMIT  = measured_average_cm * 3;
 
 if (indoor){
     // configure alert distances
-int ALERT_IMMEDIATE_LIMIT = 50;
-int ALERT_CLOSE_LIMIT  = 80;
-int ALERT_MEDIUM_LIMIT  = 100;
-int ALERT_MEDIUMFAR_LIMIT  = 140;
-int ALERT_FAR_LIMIT  = 200;
-int ALERT_VERYFAR_LIMIT  = 250;
+int ALERT_IMMEDIATE_LIMIT = 30;
+int ALERT_VERYCLOSE_LIMIT =40;
+int ALERT_CLOSE_LIMIT  = 50;
+int ALERT_MEDIUM_LIMIT  = 80;
+int ALERT_MEDIUMFAR_LIMIT  = 100;
+int ALERT_FAR_LIMIT  = 150;
+int ALERT_VERYFAR_LIMIT  = 200;
 }
 
 
     if (distance_cm <= ALERT_IMMEDIATE_LIMIT ) { //+ HYSTERESIS
         return ALERT_IMMEDIATE;
+        } else 
+            if (distance_cm <= ALERT_VERYCLOSE_LIMIT ) { //+ HYSTERESIS
+        return ALERT_VERYCLOSE;
     } else if (distance_cm <= ALERT_CLOSE_LIMIT ) {
         return ALERT_CLOSE;
     } else if (distance_cm <= ALERT_MEDIUM_LIMIT ) {
@@ -2489,6 +3163,7 @@ void update_beeper_alerts(alert_level_t new_level, int direction) {
 
 //uint32_t last_update_time = xTaskGetTickCount();
 alwaysBeep = true;
+resetPins();
 
    // Check if alert level changed
     if (new_level != beeper.current_level || alwaysBeep) {
@@ -2507,21 +3182,37 @@ alwaysBeep = true;
 
 
 
-        return;
+      //  return;
     } 
     
 
 uint32_t current_time = xTaskGetTickCount();
 
-alert_update_period = 400 / new_level;
+if(new_level < 4){
+alert_update_period = 80;
+} 
+if(new_level == 4){
+alert_update_period = 60;
+} 
+if(new_level == 5){
+alert_update_period = 50;
+} 
 
 
-if(new_level > 4){
-//alert_update_period = 30;
+if(new_level == 6){
+alert_update_period = 40;
+} 
+
+if(new_level > 6){
+alert_update_period = 20;
 } else {
 //  alert_update_period = 60;  
 }
+//alert_update_period = 10;
 
+
+//ESP_LOGI(TAG, "update period:%d current_time:%d last_update_time:%d", alert_update_period, current_time, last_update_time);
+// period:70 current_time:4643 last_update_time:4543
 
 if (current_time - last_update_time > alert_update_period ) {
 last_update_time = current_time;
@@ -2535,13 +3226,20 @@ last_update_time = current_time;
  // }
 
 
-#ifdef useAudio
+if (new_level == ALERT_VERYFAR ){
+   // xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+//playWarningToneAsync(new_level, 200);
+return;
+}
+
+
 
 if (new_level != ALERT_VERYFAR ){
    // xQueueSend(audioQueue, &new_level, portMAX_DELAY);
 //playWarningToneAsync(new_level, 200);
+
 }
-#endif
+
 /*
     if (audio_state.queue) {
          ESP_LOGI(TAG, "xQueueSendFromISR %d ", new_level);
@@ -2553,6 +3251,11 @@ if (new_level != ALERT_VERYFAR ){
     }
 */
 
+//static bool playAudio = true;
+//static bool useVibratorAlerts = false;
+
+
+
 if (direction == 1){
 
 //resetPins();
@@ -2560,68 +3263,99 @@ if (direction == 1){
 
     switch (new_level) {
         case ALERT_IMMEDIATE:
-            blink_task_init(RED_PIN_1, 2, 300);
+           // blink_task_init(RED_PIN_1, 1, 300);
+             gpio_set_level(RED_PIN_1, 1); 
+             gpio_set_level(BLUE_PIN_1, 0); 
+             gpio_set_level(GREEN_PIN_1, 0); 
            // blink_task_init(RED_PIN, 2, 300); 
              #ifdef useVibrator2
+             if(useVibratorAlerts){
             vibrator_task_init( VIBRATORPIN, 1, 80, 50);
+             }
         #endif
  //       xQueueOverwrite(audioAlertQueue, &new_level);
  #ifdef useAudio
+ if(useAudioAlerts){
  ESP_LOGI(TAG, "sens1 xQueueSend to audioQueue", new_level);
-
+ 
 xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ }
 #endif
           //   ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
 
             break;
 
+            case ALERT_VERYCLOSE:
+                #ifdef useVibrator2
+        if (useVibratorAlerts){
+            vibrator_task_init( VIBRATORPIN, 2, 60, 20);
+        }
+        #endif
+
+  #ifdef useAudio
+ if(useAudioAlerts){
+ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ }
+#endif   
+             gpio_set_level(RED_PIN_1, 1); 
+             gpio_set_level(BLUE_PIN_1, 1); 
+             gpio_set_level(GREEN_PIN_1, 0); 
+break;
+
         case ALERT_CLOSE:
         #ifdef useVibrator2
+        if (useVibratorAlerts){
             vibrator_task_init( VIBRATORPIN, 2, 60, 20);
+        }
         #endif
 
          #ifdef useAudio
- ESP_LOGI(TAG, "sens1 xQueueSend to audioQueue", new_level);
-
-xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ if(useAudioAlerts){
+ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ }
 #endif
 
          //   playWarningToneAsync(new_level, 800);
-            blink_task_init(RED_PIN_1, 1, 300); //
-           
+            //blink_task_init(RED_PIN_1, 1, 300); //
+           gpio_set_level(RED_PIN_1, 0); 
+           gpio_set_level(BLUE_PIN_1, 1); 
+           gpio_set_level(GREEN_PIN_1, 0); 
             // xQueueSend(audioQueue, &new_level, portMAX_DELAY);
             break;
 
          case ALERT_MEDIUM:
          #ifdef useVibrator2
+         if (useVibratorAlerts){
             vibrator_task_init( VIBRATORPIN, 1, 50, 50);
-          
+         }
         #endif
             gpio_set_level(RED_PIN_1, 0); 
             gpio_set_level(BLUE_PIN_1, 1);  
-            gpio_set_level(GREEN_PIN_1, 0); 
+            gpio_set_level(GREEN_PIN_1, 1); 
 
 #ifdef useAudio           
 
- //ESP_LOGI(TAG, "sens1 xQueueSend to audioQueue", new_level);
-xQueueSend(audioQueue, &new_level, portMAX_DELAY);
-
+ if(useAudioAlerts){
+ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ }
 #endif
             break;
 
          case ALERT_MEDIUMFAR:
          #ifdef useVibrator2
+         if (useVibratorAlerts){
             vibrator_task_init( VIBRATORPIN, 1, 50, 100);
+         }
         #endif
             gpio_set_level(RED_PIN_1, 0); 
-            gpio_set_level(BLUE_PIN_1, 1);  
+            gpio_set_level(BLUE_PIN_1, 0);  
             gpio_set_level(GREEN_PIN_1, 1); 
             
  //xQueueSend(audioQueue, &new_level, portMAX_DELAY);
  #ifdef useAudio
-// ESP_LOGI(TAG, "sens1 xQueueSend to audioQueue", new_level);
-
-xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+if(useAudioAlerts){
+//xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ }
 #endif
             break;
             
@@ -2632,10 +3366,12 @@ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
 // vTaskDelay(pdMS_TO_TICKS(50));
         gpio_set_level(RED_PIN_1, 0); 
         gpio_set_level(BLUE_PIN_1, 0);  
-        gpio_set_level(GREEN_PIN_1, 1); 
+        gpio_set_level(GREEN_PIN_1, 0); 
         
  #ifdef useAudio
+if(useAudioAlerts){
 //xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ }
 #endif
             break;
 
@@ -2708,13 +3444,36 @@ else { //////////// direction 2
             gpio_set_level(BLUE_PIN, 0);  
             gpio_set_level(GREEN_PIN, 0); 
              #ifdef useVibrator2
-            vibrator_task_init( VIBRATORPIN2, 2, 80, 50);
+             if (useVibratorAlerts){
+            vibrator_task_init( VIBRATORPIN2, 4, 60, 20);
+             }
         #endif
  //       xQueueOverwrite(audioAlertQueue, &new_level);
  #ifdef useAudio
- ESP_LOGI(TAG, "sens2 xQueueSend to audioQueue", new_level);
-
+if(useAudioAlerts){
 xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ }
+#endif
+          //   ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
+
+            break;
+
+                    case ALERT_VERYCLOSE:
+           // blink_task_init(RED_PIN, 2, 300);
+            gpio_set_level(RED_PIN, 1); 
+            gpio_set_level(BLUE_PIN, 0);  
+            gpio_set_level(GREEN_PIN, 0); 
+             #ifdef useVibrator2
+             if (useVibratorAlerts){
+               // vibrator_task_init( VIBRATORPIN2, 3, 80, 50);
+            vibrator_task_init( VIBRATORPIN2, 2, 80, 40);
+             }
+        #endif
+ //       xQueueOverwrite(audioAlertQueue, &new_level);
+ #ifdef useAudio
+if(useAudioAlerts){
+xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ }
 #endif
           //   ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
 
@@ -2722,11 +3481,15 @@ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
 
         case ALERT_CLOSE:
         #ifdef useVibrator2
-            vibrator_task_init( VIBRATORPIN2, 1, 100, 50);
+        if (useVibratorAlerts){
+            vibrator_task_init( VIBRATORPIN2, 1, 100, 60);
+        }
         #endif
 
          #ifdef useAudio
-            xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+            if(useAudioAlerts){
+xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ }
         #endif
 
          //   playWarningToneAsync(new_level, 800);
@@ -2739,8 +3502,9 @@ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
 
          case ALERT_MEDIUM:
          #ifdef useVibrator2
-            vibrator_task_init( VIBRATORPIN2, 1, 50, 50);
-          
+         if (useVibratorAlerts){
+            vibrator_task_init( VIBRATORPIN2, 1, 50, 70);
+         }
         #endif
             gpio_set_level(RED_PIN, 0); 
             gpio_set_level(BLUE_PIN, 1);  
@@ -2749,14 +3513,18 @@ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
 #ifdef useAudio           
 
 // ESP_LOGI(TAG, "sens1 xQueueSend to audioQueue", new_level);
+if(useAudioAlerts){
 xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ }
 
 #endif
             break;
 
          case ALERT_MEDIUMFAR:
          #ifdef useVibrator2
-            vibrator_task_init( VIBRATORPIN2, 1, 50, 100);
+         if (useVibratorAlerts){
+          //  vibrator_task_init( VIBRATORPIN2, 1, 50, 100);
+         }
         #endif
             gpio_set_level(RED_PIN, 0); 
             gpio_set_level(BLUE_PIN, 0);  
@@ -2806,75 +3574,6 @@ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
     }
 
 
-
-/*
-if (new_level == 3){
-//blink_task_init(BLUE_PIN_1, 5, 500); // 
-blink_task_init(GREEN_PIN, 1, 80);
-}
-
-if (new_level == 4){
-//blink_task_init(BLUE_PIN_1, 5, 500); // 
-blink_task_init(BLUE_PIN, 1, 80);
-
-#ifdef useVibrator2
-vibrator_task_init( VIBRATORPIN2, 2, 50, 90);
-#endif
-
- #ifdef useAudio
- ESP_LOGI(TAG, "sens 2 xQueueSend to audioQueue", new_level);
-
-xQueueSend(audioQueue, &new_level, portMAX_DELAY);
-#endif
-
-}
-
-
-if (new_level == 5){
-blink_task_init(BLUE_PIN, 1, 300); // 
-//blink_task_init(GREEN_PIN, 3, 100);
-
-#ifdef useVibrator2
-vibrator_task_init( VIBRATORPIN2, 2, 100, 80);
-//vTaskDelay(pdMS_TO_TICKS(100));
-//vibrator_task_init( VIBRATORPIN, 2, 100);
-#endif
-
- #ifdef useAudio
- ESP_LOGI(TAG, "sens 2 xQueueSend to audioQueue", new_level);
-
-xQueueSend(audioQueue, &new_level, portMAX_DELAY);
-#endif
-
-}
-
-if (new_level == 6){
-//gpio_set_level(VIBRATORPIN, 1); 
-blink_task_init(RED_PIN, 2, 80);
-
-#ifdef useVibrator2
-vibrator_task_init( VIBRATORPIN2, 3, 200, 50);
-#endif
-
- #ifdef useAudio
- ESP_LOGI(TAG, "sens 2 xQueueSend to audioQueue", new_level);
-
-xQueueSend(audioQueue, &new_level, portMAX_DELAY);
-#endif
-
-//vTaskDelay(pdMS_TO_TICKS(200));
-//blink_task_init(BLUE_PIN, 3, 200);
-//vTaskDelay(pdMS_TO_TICKS(200));
-
-
-//vTaskDelay(pdMS_TO_TICKS(200));
-
-//gpio_set_level(GREEN_PIN_1, 0); 
-
-
-        } //new_level ==6
-
-        */
 //vTaskDelay(pdMS_TO_TICKS(200));
 } // end sensor2
 
@@ -2884,302 +3583,6 @@ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
 
 }
 
-// simplified update_beeper_alerts function
-void update_beeper_alertsX(alert_level_t new_level, int direction) {
-    uint32_t current_time = xTaskGetTickCount() * portTICK_PERIOD_MS;
-
-    const alert_config_t *config = &alert_configs[beeper.current_level];
-
-if (direction == 1){
-
-resetPins();
-
-
-// special for immediate close, always react
-//if (new_level ==6){
-//blink_task_init(RED_PIN_1, 5, 300); // 
-//blink_task_init(BLUE_PIN_1, 5, 300); // 
-//blink_task_init(GREEN_PIN_1, 5, 300); // 
-
-//#ifdef useVibrator2
-//vibrator_task_init( VIBRATORPIN, 1, 200, 100);
-
-//#endif
-
-//#ifdef useAudio
-//playWarningToneAsync(new_level, 1000);
-//#endif
-
-//gpio_set_level(VIBRATORPIN, 1); 
-
-//gpio_set_level(RED_PIN_1, 1); 
-//gpio_set_level(BLUE_PIN_1, 0);  
-//gpio_set_level(GREEN_PIN_1, 0); 
-//vTaskDelay(pdMS_TO_TICKS(100));
-        } //new_level ==6
-
-
-    // Check if alert level changed
-    if (new_level != beeper.current_level || alwaysBeep) {
-        beeper.current_level = new_level;
-        beeper.last_beep_time = 0;
-        beeper.is_beeping = false;
-        set_beeper_tone(0, false);
-     
-
-    if (beeper.current_level == ALERT_SILENT) {
-        if (beeper.is_beeping) {
-            set_beeper_tone(0, false);
-            beeper.is_beeping = false;
-        }
-
-
-
-
-        return;
-    } 
-    
-
-
- ESP_LOGI(TAG, "new_level %d", new_level);
-
-
-
-
-//gpio_set_level(RED_PIN_1, 0); 
-//gpio_set_level(BLUE_PIN_1, 0);  
-//gpio_set_level(GREEN_PIN_1, 0); 
-
-//gpio_set_level(VIBRATORPIN, 0); 
-
-/*
-if (new_level ==6){
-    blink_task_init(RED_PIN_1, 5, 500); // 
-
-    #ifdef useVibrator2
-        vibrator_task_init( VIBRATORPIN, 20, 100);
-    #endif
-
-    //gpio_set_level(VIBRATORPIN, 1); 
-
-/   /gpio_set_level(RED_PIN_1, 1); 
-    gpio_set_level(BLUE_PIN_1, 0);  
-    gpio_set_level(GREEN_PIN_1, 0); 
-    vTaskDelay(pdMS_TO_TICKS(100));
-}
-*/
-
-
-/*
-   // Audio alerts with appropriate durations
-    switch (new_level) {
-        case ALERT_VERYFAR:
-            playWarningTone(new_level, 300); // Short gentle tone
-            break;
-        case ALERT_FAR:
-            playWarningTone(new_level, 400);
-            break;
-        case ALERT_MEDIUMFAR:
-            playWarningTone(new_level, 500);
-            break;
-        case ALERT_MEDIUM:
-            playWarningTone(new_level, 600);
-            break;
-        case ALERT_CLOSE:
-            playWarningTone(new_level, 800); // Longer warning
-            break;
-        case ALERT_IMMEDIATE:
-            playWarningTone(new_level, 1000); // Continuous urgent tone
-            break;
-        default:
-            // ALERT_SILENT or others
-            break;
-    }
-            */
-
-
-            
-if (new_level ==6){
-blink_task_init(RED_PIN_1, 5, 300); // 
-//blink_task_init(BLUE_PIN_1, 5, 300); // 
-//blink_task_init(GREEN_PIN_1, 5, 300); // 
-
-#ifdef useVibrator2
-vibrator_task_init( VIBRATORPIN, 1, 200, 100);
-
-#endif
-
-#ifdef useAudio
-//playWarningToneAsync(new_level, 1000);
-#endif
-
-
-       if (new_level ==5){
-
-#ifdef useVibrator2
-vibrator_task_init( VIBRATORPIN, 1, 100, 50);
-
-#endif
-
-#ifdef useAudio
-//playWarningToneAsync(new_level, 800);
-//playWarningTone(new_level, 100); 
-//playWarningTone(new_level, 50); 
-#endif
-
-
-blink_task_init(RED_PIN_1, 2, 300); // 
-//gpio_set_level(RED_PIN_1, 1); 
-gpio_set_level(BLUE_PIN_1, 0);  
-gpio_set_level(GREEN_PIN_1, 0); 
-// vTaskDelay(pdMS_TO_TICKS(80));
-        }
-if (new_level ==4 ){
- //   blink_task_init(BLUE_PIN_1, 5, 500); // 
-#ifdef useVibrator2
-vibrator_task_init( VIBRATORPIN, 1, 50, 50);
- 
-#endif
-
-#ifdef useAudio
-//playWarningToneAsync(new_level, 600);
-//playWarningTone(new_level, 100); 
-#endif
-
-
-gpio_set_level(RED_PIN_1, 0); 
-gpio_set_level(BLUE_PIN_1, 1);  
-gpio_set_level(GREEN_PIN_1, 0); 
-//vTaskDelay(pdMS_TO_TICKS(60));
-        }
-
-if (new_level ==3 ){
-#ifdef useVibrator2
-vibrator_task_init( VIBRATORPIN, 1, 50, 100);
-
-#endif
-
-#ifdef useAudio
-//playWarningToneAsync(new_level, 500);
-//playWarningTone(new_level, 100); 
-#endif
-
-
-gpio_set_level(RED_PIN_1, 0); 
-gpio_set_level(BLUE_PIN_1, 1);  
-gpio_set_level(GREEN_PIN_1, 1); 
-// vTaskDelay(pdMS_TO_TICKS(50));
-        }
-
-        if (new_level ==2){
-
-            #ifdef useAudio
-      //      playWarningToneAsync(new_level, 400);
-//playWarningTone(new_level, 100); 
-#endif
-
-
-vibrator_task_init( VIBRATORPIN, 1, 40, 200);
-// vTaskDelay(pdMS_TO_TICKS(50));
-gpio_set_level(RED_PIN_1, 0); 
-gpio_set_level(BLUE_PIN_1, 0);  
-gpio_set_level(GREEN_PIN_1, 1); 
-        }
-        if (new_level ==1){
-
-#ifdef useAudio
-//playWarningToneAsync(new_level, 300);
-//playWarningTone(new_level, 100); 
-#endif
-
-
-gpio_set_level(RED_PIN_1, 0); 
-gpio_set_level(BLUE_PIN_1, 0);  
-//gpio_set_level(GREEN_PIN_1, 0); 
-blink_task_init(GREEN_PIN_1, 1, 100); // 
-        }
-        if (new_level ==0){
-gpio_set_level(RED_PIN_1, 0); 
-gpio_set_level(BLUE_PIN_1, 0);  
-//gpio_set_level(GREEN_PIN_1, 0); 
-blink_task_init(GREEN_PIN_1, 1, 100); // 
-        }
-
-
-    }
-/*
-    if (beeper.is_beeping) {
-        if (current_time - beeper.beep_start_time >= config->beep_duration_ms) {    
-            set_beeper_tone(0, false);
-            beeper.is_beeping = false;
-            beeper.last_beep_time = current_time;
-        }
-    } else {
-        if (current_time - beeper.last_beep_time >= config->beep_interval_ms) {
-            set_beeper_tone(config->frequency_hz, true);
-            beeper.is_beeping = true;
-            beeper.beep_start_time = current_time;
-        }
-    }
-
-    
-    vTaskDelay(pdMS_TO_TICKS(200));
-    */
-} // direction 1
-
-//////////// direction 2
-else { 
-
-if (new_level == 3){
-//blink_task_init(BLUE_PIN_1, 5, 500); // 
-blink_task_init(GREEN_PIN, 1, 80);
-}
-
-if (new_level == 4){
-//blink_task_init(BLUE_PIN_1, 5, 500); // 
-blink_task_init(BLUE_PIN, 1, 80);
-
-#ifdef useVibrator2
-vibrator_task_init( VIBRATORPIN2, 2, 50, 90);
-#endif
-}
-
-
-if (new_level == 5){
-blink_task_init(BLUE_PIN, 1, 300); // 
-//blink_task_init(GREEN_PIN, 3, 100);
-
-#ifdef useVibrator2
-vibrator_task_init( VIBRATORPIN2, 2, 100, 80);
-//vTaskDelay(pdMS_TO_TICKS(100));
-//vibrator_task_init( VIBRATORPIN, 2, 100);
-#endif
-
-}
-
-if (new_level == 6){
-//gpio_set_level(VIBRATORPIN, 1); 
-blink_task_init(RED_PIN, 2, 80);
-
-#ifdef useVibrator2
-vibrator_task_init( VIBRATORPIN2, 3, 200, 50);
-#endif
-//vTaskDelay(pdMS_TO_TICKS(200));
-//blink_task_init(BLUE_PIN, 3, 200);
-//vTaskDelay(pdMS_TO_TICKS(200));
-
-
-//vTaskDelay(pdMS_TO_TICKS(200));
-
-//gpio_set_level(GREEN_PIN_1, 0); 
-
-
-        } //new_level ==6
-//vTaskDelay(pdMS_TO_TICKS(200));
-} // end sensor2
-//vTaskDelay(pdMS_TO_TICKS(100));
-//resetPins();
-}
 /*
 void system_monitor_task(void *pvParameters) {
     while(1) {
@@ -3193,6 +3596,7 @@ void system_monitor_task(void *pvParameters) {
 }
 */
 
+#ifdef useVl53l5cx
 
 bool vl53l5cx_recover(VL53L5CX_Configuration *dev) {
     ESP_LOGW(TAG, "Attempting VL53L5CX recovery...");
@@ -3279,7 +3683,7 @@ vl53l5cx_hasMutex = true;
     return true;
 }
 
-#ifdef useVl53l5cx
+
 // New task function for the sensor loop
 void vl53l5cx_reader_task(void *pvParameters) {
 
@@ -3793,6 +4197,8 @@ if (vl53l5cx_hasMutex){
 #endif
 
 
+
+#ifdef usePinPolling
 // polling gpio 
 // How often (ms) to poll
 static constexpr TickType_t POLL_PERIOD_MS = 500;
@@ -3804,30 +4210,153 @@ using gpio_cb_t = void(*)(gpio_num_t pin);
 
 // Maximum GPIO number on the S3
 static constexpr int MAX_GPIO = 40;
+#endif
 
 
-#ifdef useXiaoCam
 //#define CAM_PIN        GPIO_NUM_40
 //gpio_set_direction(CAM_PIN, GPIO_MODE_INPUT);
 
 ///// polling gpio version //////
 // Task that polls one pin
+
+ // static u_int8_t AlertPin_value = 0;
+//static pin_values_t pinValues[5] = {5, 7, 8, 9, 40}; 
+
+
+// Configuration
+#define DEBOUNCE_MS 25
+#define MAX_BUTTONS 4       // Reduce if fewer buttons needed
+#define BUTTON_TASK_STACK 2048
+#define BUTTON_TASK_PRIORITY 1  // Low priority since buttons are rarely used
+
+typedef struct {
+    gpio_num_t pin;
+    int last_state;  // Changed from bool to int (gpio_get_level returns int)
+    uint32_t last_change_time;
+} button_t;
+
+static button_t buttons[MAX_BUTTONS];
+static size_t num_buttons = 0;
+static QueueHandle_t button_event_queue = NULL;
+
+typedef struct {
+    gpio_num_t pin;
+    int new_state;   // Changed from bool to int
+} button_event_t;
+
+void button_task(void *arg) {
+    button_event_t event;
+
+      ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+      
+
+    while(1) {
+
+           ESP_ERROR_CHECK(esp_task_wdt_reset());
+
+        
+        for (int i = 0; i < num_buttons; i++) {
+            int current = gpio_get_level(buttons[i].pin); // gpio_get_level returns int
+            uint32_t now = xTaskGetTickCount() * portTICK_PERIOD_MS;
+            
+            if (current != buttons[i].last_state) {
+                if ((now - buttons[i].last_change_time) > DEBOUNCE_MS) {
+                    event.pin = buttons[i].pin;
+                    event.new_state = current;
+                    xQueueSend(button_event_queue, &event, 0);
+                    
+                    buttons[i].last_state = current;
+                    buttons[i].last_change_time = now;
+                }
+            } else {
+                buttons[i].last_change_time = now;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+esp_err_t button_init(gpio_num_t gpio_num, gpio_pull_mode_t pull_mode) {
+
+
+
+    if (num_buttons >= MAX_BUTTONS) return ESP_FAIL;
+
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << gpio_num),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = (pull_mode == GPIO_PULLUP_ONLY || pull_mode == GPIO_PULLUP_PULLDOWN) ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE,
+        .pull_down_en = (pull_mode == GPIO_PULLDOWN_ONLY || pull_mode == GPIO_PULLUP_PULLDOWN) ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    ESP_ERROR_CHECK(gpio_config(&io_conf));
+
+    buttons[num_buttons] = (button_t){
+        .pin = gpio_num,
+        .last_state = gpio_get_level(gpio_num), // Returns int (0 or 1)
+        .last_change_time = 0
+    };
+    num_buttons++;
+ESP_LOGI("BUTTON", "inited button pin %d", (int) gpio_num);
+
+    return ESP_OK;
+}
+
+void button_system_init() {
+    button_event_queue = xQueueCreate(5, sizeof(button_event_t));
+    xTaskCreate(button_task, "button_task", BUTTON_TASK_STACK, NULL, BUTTON_TASK_PRIORITY, NULL);
+}
+
+bool get_button_event(button_event_t *event, uint32_t timeout_ms) {
+
+//ESP_LOGI("BUTTON", "Got button event");
+
+    return xQueueReceive(button_event_queue, event, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
+   // return false;
+}
+
+
+#ifdef usePinPolling
 static void poll_pin_task(void* arg)
 {
     gpio_num_t pin = (gpio_num_t)(uintptr_t)arg;
+   // int pinArrayPlace = find(pinValues,sizeof(pinValues),(int) pin);
+    // int pinArrayPlace = find(pinValues,5,(int) pin);
+
+//ESP_LOGI("POLLINIT", "Init for Pin %d init at place %d ", pin, pinArrayPlace  );
+  ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+          
+
     for (;;) {
         int level = gpio_get_level(pin);
       //  int trigger_level = arg.pin;
       int trigger_level = 1;
-        if (level == trigger_level) {
-            ESP_LOGI("POLL", "Pin %d is LOW → triggering", pin);
+
+//int pinArrayPlace = find(pinValues,sizeof(pinValues),(int) pin);
+//pinArrayPlace = find(pinValues,5,(int) pin);
+//int currentvalue = pinValues[pinArrayPlace];
+// pinValues[pinArrayPlace];
+
+           ESP_ERROR_CHECK(esp_task_wdt_reset());
+
+
+ESP_LOGI("POLL", "Pin %d has level %d ", pin,level);
+//pinValues[pinArrayPalce]
+
+        if (level == trigger_level ) { //&& currentvalue != level
+            ESP_LOGI("POLL", "Pin %d is %d → triggering, value now is %d", pin, trigger_level );
             pin_triggered_function(pin);
             // wait for it to go back HIGH before retriggering
             while (gpio_get_level(pin) != trigger_level) {
-                vTaskDelay(pdMS_TO_TICKS(10));
+                vTaskDelay(pdMS_TO_TICKS(100));
             }
+          //  pinValues[pinArrayPlace] = level;
+
+
+           // ESP_LOGI("POLL", "setting %d at %d to %d", pin, pinArrayPlace, level);
         }
         vTaskDelay(pdMS_TO_TICKS(POLL_PERIOD_MS));
+        // vTaskDelay(pdMS_TO_TICKS(500));
     }
 }
 ///// polling gpio version //////
@@ -3847,38 +4376,66 @@ esp_err_t init_polled_input(gpio_num_t pin, bool pullup = true)
     BaseType_t ok = xTaskCreate(
         poll_pin_task,
         "poll_pin",
-        2048,
+        4048,
         (void*)(uintptr_t)pin,
         tskIDLE_PRIORITY + 1,
         nullptr
     );
     return (ok == pdPASS) ? ESP_OK : ESP_FAIL;
 }
+#endif
+
+
+#ifdef usePinPolling
 ///// polling gpio version //////
 // Example “action” when pin goes low
 void pin_triggered_function(gpio_num_t pin)
 {
-
+#ifdef useXiaoCam
     if ( (uint8_t) pin == CAM_PIN){
       //  save_nvs(nvs_var_serial, 0);
       // person detected
 ESP_LOGI("CAM", "Person detected %d", pin);
 blink_task_init(GREEN_PIN, 5, 80);
     }
+#endif
+
+/*
+   if ( (uint8_t) pin == ALERT_TYPE_PIN){
+
+//AlertPin_value = 1;
+      //  save_nvs(nvs_var_serial, 0);
+      // person detected
+ESP_LOGI("AlertPin", "Alertswitch detected %d", pin);
+//blink_task_init(GREEN_PIN, 5, 80);
+useVibratorAlerts = !useVibratorAlerts;
+
+if(useVibratorAlerts){
+useAudioAlerts = false ;
+   }   else {
+useAudioAlerts = true ;
+    }
+ vTaskDelay(pdMS_TO_TICKS(2000));
+}
+*/
     // …your code here…
     ESP_LOGI("ACTION", "Handling event from pin %d", pin);
 }
-
 
 #endif
 
 
  #ifdef useUltrasound
+
+
+
  void ultrasonic_ranger(void *pvParameters) {
 
     // ultrasound_mutex
 //ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
+  ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+   
 
     ultrasonic_sensor_t sensor = {
         .trigger_pin = TRIGGER_GPIO,
@@ -3907,12 +4464,12 @@ static int ultrasonic_update_period = 5;
 */
 
 
-
 for (;;) {
 
 //    esp_task_wdt_delete(NULL); 
-    
- //   ESP_ERROR_CHECK(esp_task_wdt_reset());
+   
+ // ESP_ERROR_CHECK(esp_task_wdt_reset());
+
             uint32_t notification_value = 0;
 
         // 1. Wait indefinitely for any notification (e.g., the START signal)
@@ -3932,24 +4489,13 @@ for (;;) {
      uint32_t distance2 = 0;
 
 float temp = 25.0;
-uint32_t  min_time_between_ultrasound = 80;
-// 
+uint32_t  min_time_between_ultrasound = 50;
+
 
     while (true)
     {
    
-//ESP_ERROR_CHECK(esp_task_wdt_reset());
-//uint32_t active_distance = distance;
-
-//if (sensornumber == 0){
-//ultrasonic_sensor_t active_sensor = sensor;
-//active_distance = distance;
-//sensornumber = 1;
-//} else {
-//ultrasonic_sensor_t active_sensor = sensor2;
-//active_distance = distance2;
-//sensornumber = 2;
-//}  uint32_t current_time = xTaskGetTickCount();
+ESP_ERROR_CHECK(esp_task_wdt_reset());
 
 
   if (xSemaphoreTake(ultrasound_mutex, portMAX_DELAY) == pdTRUE) {
@@ -3967,20 +4513,20 @@ uint32_t u1_read_time = xTaskGetTickCount();
             esp_err_t res = ultrasonic_measure_cm(&sensor, MAX_DISTANCE_CM, &distance);
      //   esp_err_t res = ultrasonic_measure_cm_temp_compensated(&sensor, MAX_DISTANCE_CM, &distance, temp);
  
- /*
+
      if (res != ESP_OK)
        {
           printf("Error %d: ", res);
             switch (res)
             {
                 case ESP_ERR_ULTRASONIC_PING:
-                    printf("Cannot ping sensor 1 (device is in invalid state)\n");
+                    printf("Cannot ping ultrasonic sensor 1 (device is in invalid state)\n");
                     break;
                 case ESP_ERR_ULTRASONIC_PING_TIMEOUT:
-                    printf("Ping timeout sensor 1 (no device found)\n");
+                    printf("Ping timeout ultrasonic sensor 1 (no device found)\n");
                     break;
                 case ESP_ERR_ULTRASONIC_ECHO_TIMEOUT:
-                    printf("Echo timeout sensor 1\n");
+                    printf("Echo timeout ultrasonic sensor 1\n");
                     alert_level = get_alert_level( 500, 200);
                     break;
                 default:
@@ -3989,7 +4535,7 @@ uint32_t u1_read_time = xTaskGetTickCount();
         }
         else {
 
-        */
+  
          printf("Distance from sensor %d: %lu\n", 1, distance);
             alert_level = get_alert_level( distance, 200);
       printf("sens1 get_alert_level %lu\n", distance);
@@ -3998,7 +4544,7 @@ uint32_t u1_read_time = xTaskGetTickCount();
 
 //ESP_LOGI(TAG, "update_beeper_alerts: %d ",  alert_level);
 update_beeper_alerts(alert_level, 1);
- //} // no error reading
+} // no error reading
 
 //play_sine_tone(200, 1200);
               
@@ -4041,13 +4587,13 @@ u2_read_time = xTaskGetTickCount();
             switch (res)
             {
                 case ESP_ERR_ULTRASONIC_PING:
-                    printf("Cannot ping sensor 2 (device is in invalid state)\n");
+                    printf("Cannot ping ultrasonic sensor 2 (device is in invalid state)\n");
                     break;
                 case ESP_ERR_ULTRASONIC_PING_TIMEOUT:
-                    printf("Ping timeout sensor 2 (no device found )\n");
+                    printf("Ping timeout ultrasonic sensor 2 (no device found )\n");
                     break;
                 case ESP_ERR_ULTRASONIC_ECHO_TIMEOUT:
-                    printf("Echo timeout sensor 2 \n");
+                    printf("Echo timeout ultrasonic sensor 2 \n");
                     alert_level_2 = get_alert_level( 500, 200);
                     break;
                 default:
@@ -4058,9 +4604,12 @@ u2_read_time = xTaskGetTickCount();
            // printf("Distance from sensors 1:%lu 2:%lu\n",  distance, distance2);
          //   alert_level_2 = get_alert_level( distance2, 200);
          
-       
+//       ultraSensorDistance1 = distance;
+//       ultraSensorDistance2 = distance2;
 
-    printf("Distance from sensors 1:%lu 2:%lu\n",  distance, distance2);
+ printf("Distance from sensor %d: %lu\n", 2, distance2);
+
+ //   printf("Distance from sensors 1:%lu 2:%lu\n",  distance, distance2);
                 //  printf("Distance from sensors 2:%lu\n",  distance2);
 //ESP_LOGI(TAG, "alert_level dist: %lu ",  distance);
 //  if (distance2 <= distance) {
@@ -4072,7 +4621,7 @@ if(distance2f + sensor2_diff <= 0) {
 } else {
 adjusted_distance = distance2f + sensor2_diff ;
 }
- printf("sending adjusted_distance:%f \n", adjusted_distance);
+// printf("sending adjusted_distance:%f \n", adjusted_distance);
 
 
         alert_level_2 = get_alert_level( adjusted_distance , 200);
@@ -4083,6 +4632,7 @@ adjusted_distance = distance2f + sensor2_diff ;
 //  }
 
  } // no error reading
+
 xSemaphoreGive(ultrasound_mutex);
  ESP_LOGD(TAG, "ultrasound gave mutex .");
 //vTaskDelay(pdMS_TO_TICKS(100));
@@ -4107,7 +4657,7 @@ else {
                     ESP_LOGI(TAG, "STOP signal for ultrasound loop.");
                     break; // Exit the inner "running" loop
                 }
-vTaskDelay(pdMS_TO_TICKS(400));
+vTaskDelay(pdMS_TO_TICKS(100));
     }/// loop while true
     
 
@@ -4116,158 +4666,12 @@ vTaskDelay(pdMS_TO_TICKS(400));
 
 vTaskDelay(pdMS_TO_TICKS(100));
 //esp_task_wdt_add(NULL);
+
 } // outer loop waiting for semaphore
 
 }
 #endif
 
-
- #ifdef useUltrasound_old
- void ultrasonic_ranger_2(void *pvParameters) {
-
-// ultrasound_mutex
-
-uint32_t last_update_time = xTaskGetTickCount();
-static int ultrasonic_update_period = 5;
-
- //void parameters(int index,int trigPin, int echoPin, int minDistance = 5, int maxDistance = 300, int maxRetry = 3, int pulseTuning = 200, bool debug = false);
-
-//myObjSonar.parameters(2, trigPin3, echoPin3, 5, 300, 2, 130, true); 
-       ultrasonic_sensor_t sensor2 = {
-        .trigger_pin = TRIGGER_GPIO_2,
-        .echo_pin = ECHO_GPIO_2,
-    };
-    ultrasonic_init(&sensor2);
-
-
-
-for (;;) {
-
-            uint32_t notification_value = 0;
-
-        // 1. Wait indefinitely for any notification (e.g., the START signal)
-        // This call will block until xTaskNotify is called on this task.
-        xTaskNotifyWait(0,           /* Don't clear any bits on entry */
-                        ULONG_MAX,   /* Clear all bits on exit */
-                        &notification_value, /* Stores the notification value */
-                        portMAX_DELAY);      /* Block forever */
-
-        // 2. Check if the START signal was received
-        if (notification_value & START_BIT) {
-            ESP_LOGI(TAG, "START signal for ultrasonic reading loop 2.");
-
-
-     uint32_t distance2 = 0;
-
-// 
-   alert_level_t alert_level_2 = ALERT_VERYFAR;
-   
-    while (true)
-    {
-   
-    
-     
-
-//uint32_t active_distance = distance;
-
-//if (sensornumber == 0){
-//ultrasonic_sensor_t active_sensor = sensor;
-//active_distance = distance;
-//sensornumber = 1;
-//} else {
-//ultrasonic_sensor_t active_sensor = sensor2;
-//active_distance = distance2;
-//ensornumber = 0;
-//}  uint32_t current_time = xTaskGetTickCount();
-uint32_t current_time = xTaskGetTickCount();
-last_update_time = 0;
-
-
- if (xSemaphoreTake(ultrasound_mutex, portMAX_DELAY) == pdTRUE) {
- ESP_LOGI(TAG, "ultrasound2 Got mutex .");
-////// sensor 2
-
-
-if (current_time - last_update_time > ultrasonic_update_period ) {
-// last_update_time = current_time;
-
-float temp = 25.0;
- 
-
-       esp_err_t res = ultrasonic_measure_cm_temp_compensated(&sensor2, MAX_DISTANCE_CM, &distance2, temp);
-        if (res != ESP_OK)
-        {
-            printf("Error %d: ", res);
-            switch (res)
-            {
-                case ESP_ERR_ULTRASONIC_PING:
-                    printf("Cannot ping (device is in invalid state)\n");
-                    break;
-                case ESP_ERR_ULTRASONIC_PING_TIMEOUT:
-                    printf("Ping timeout (no device found)\n");
-                    break;
-                case ESP_ERR_ULTRASONIC_ECHO_TIMEOUT:
-                    printf("Echo timeout (i.e. distance too big)\n");
-                    alert_level_2 = get_alert_level( 500, 200);
-                    break;
-                default:
-                    printf("%s\n", esp_err_to_name(res));
-            }
-        }
-        else {
-           // printf("Distance from sensors 1:%lu 2:%lu\n",  distance, distance2);
-         //   alert_level_2 = get_alert_level( distance2, 200);
-         
-        }
-
-
-                  printf("Distance from sensors 2:%lu\n",  distance2);
-//ESP_LOGI(TAG, "alert_level dist: %lu ",  distance);
-//  if (distance2 <= distance) {
-        alert_level_2 = get_alert_level( distance2, 200);
-        update_beeper_alerts(alert_level_2, 2);
-//  } else {
-     //   alert_level = get_alert_level( distance, 200);
-      //  update_beeper_alerts(alert_level, 1);
-//  }
-
-xSemaphoreGive(ultrasound_mutex);
- ESP_LOGI(TAG, "ultrasound2 Gave mutex.");
-//vTaskDelay(pdMS_TO_TICKS(100));
-       // vTaskDelay(pdMS_TO_TICKS(500));
-
-            } //  if (xSemaphoreTake(ultrasound_mutex, portMAX_DELAY) == pdTRUE) {
-
-
-} // 
-
-else {
-
-    ESP_LOGI(TAG, "No mutex for ultra 2."); 
-}
-
-
-               // --- CRITICAL PART: Check for a STOP signal ---
-                uint32_t stop_signal_value = 0;
-                // Use a zero timeout to check instantly without blocking
-                xTaskNotifyWait(0, ULONG_MAX, &stop_signal_value, 0);
-
-                // 3. If a STOP signal was sent, break the inner loop
-                if (stop_signal_value & STOP_BIT) {
-                    ESP_LOGI(TAG, "STOP signal for ultrasound loop.");
-                    break; // Exit the inner "running" loop
-                }
-vTaskDelay(pdMS_TO_TICKS(200));
-    }/// loop while true
-    
-
-
-} // start semaphore
-
-} // outside forever loop
-
-}
-#endif
 
 
 void find_reset_reason( int resetreason){
@@ -4350,6 +4754,8 @@ extern "C" void app_main(void)
     ESP_ERROR_CHECK(ret);
 
  //initialize_watchdog();
+// already auto inited in config
+
 
  #ifdef useGPS_2  
     nmea_example_init_interface();
@@ -4365,38 +4771,64 @@ gpio_set_direction(BLUE_PIN_1, GPIO_MODE_OUTPUT);
 gpio_set_direction(GREEN_PIN_1, GPIO_MODE_OUTPUT);
 
 
-    uint32_t last_sensor_read = 0;
 
+
+/////// i2c init //////
+
+initialize_i2c();
+xTaskCreate(i2c_task, "i2c_task", 4096, NULL, 10, NULL);
+/*
     i2c_port_t i2c_port = I2C_NUM_1;
- 
 
-   i2c_master_bus_config_t i2c_mst_config = {
+
+    i2c_master_bus_config_t i2c_mst_config = {
         .i2c_port = i2c_port,
         .sda_io_num = GPIO_NUM_1,
         .scl_io_num = GPIO_NUM_2,
         .clk_source = I2C_CLK_SRC_DEFAULT,
         .glitch_ignore_cnt = 7,
         .flags {
-            .enable_internal_pullup = true,
+            .enable_internal_pullup = false,
             .allow_pd = false,
         }
     };
 
-    i2c_master_bus_handle_t bus_handle;
+   i2c_master_bus_handle_t bus_handle;
     ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_mst_config, &bus_handle));
+*/
 
-
-        g_i2c_bus_mutex = xSemaphoreCreateMutex();
+/*
+    g_i2c_bus_mutex = xSemaphoreCreateMutex();
     if (g_i2c_bus_mutex == NULL) {
         ESP_LOGE("MAIN", "Fatal: Failed to create I2C bus mutex!");
-        return;
+      //  return;
     }
+      */
+/////// end i2c init /////////
+
+ #ifdef useLuna
+
+ //  xTaskCreate(tf_luna_task, "tf_luna", 4096, bus_handle, 5, NULL);
+
+  /* 
+    if (tf_luna_init() != ESP_OK) {
+        ESP_LOGE("MAIN", "TF-Luna init failed");
+        return;
+    } else {
+          ESP_LOGI("TF_LUNA", "Luna inited");
+    }
+*/
+#endif
+ //#ifndef useLuna
+
+//scan_i2c_devices();
+
 
  #ifdef useGPS    
             uart_mutex = xSemaphoreCreateMutex();
     if (uart_mutex == NULL) {
         ESP_LOGE("MAIN", "Fatal: Failed to create UART  mutex!");
-        return;
+        //return;
     }
        
 #endif
@@ -4405,7 +4837,7 @@ gpio_set_direction(GREEN_PIN_1, GPIO_MODE_OUTPUT);
             ultrasound_mutex = xSemaphoreCreateMutex();
     if (ultrasound_mutex == NULL) {
         ESP_LOGE("MAIN", "Fatal: Failed to create Ultrasound mutex!");
-        return;
+        //return;
     }
      
 #endif
@@ -4415,9 +4847,10 @@ gpio_set_direction(GREEN_PIN_1, GPIO_MODE_OUTPUT);
         mpu_data_queue = xQueueCreate(5, sizeof(mpu_data_t));
 #endif
 
+#ifdef useRGBLed;
 led_state_queue = xQueueCreate(1, sizeof(led_state_t)); // Correct queue
 ESP_LOGI("MAIN", "Mutex and Queues created.");
-
+#endif
 
 #ifdef useGPS
 GPS_init();
@@ -4435,6 +4868,9 @@ xTaskCreatePinnedToCore(
 
 #endif
 
+ //   i2c_scan_devices() ;
+ //  vTaskDelay(pdMS_TO_TICKS(3000)); // Wait for the sensor to stabilize
+
 
 #ifdef useAccelerometer
 
@@ -4446,24 +4882,41 @@ xTaskCreatePinnedToCore(
         .scl_speed_hz = 100000,
     };
 
+     /*
+      esp_err_t ret = i2c_new_master_bus(&i2c_bus_config, &bus_handle);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to initialize I2C bus: %s", esp_err_to_name(ret));
+            vSemaphoreDelete(i2c_mutex);
+            return ret;
+        }
+      */  
+
     ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &mpu9250_dev_cfg, &mpu9250_dev_handle));
     ESP_LOGI("I2C", "Device MPU9250 added to bus");
     
     // IMPORTANT: Wake up the MPU9250 from sleep mode
-    ESP_LOGI("MPU9250", "Waking up sensor...");
-    ESP_ERROR_CHECK(i2c_master_transmit(
+    ESP_LOGI("MPU9250", "Waking up aceelerometer sensor...");
+
+
+
+    esp_err_t ret3 = i2c_master_transmit(
         mpu9250_dev_handle, 
         (const uint8_t[]){ MPU9250_PWR_MGMT_1_REG_ADDR, 0x00 }, // Write 0 to PWR_MGMT_1
         2, 
         pdMS_TO_TICKS(100)
-    ));
-
+    );
+    if (ret3 != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to initialize mpu9250_dev_handle");
+       // return;
+    } else {
     ESP_LOGI(TAG, "MPU9250 Initialized.");
-
+    }
 
     vTaskDelay(pdMS_TO_TICKS(100)); // Wait for the sensor to stabilize
 
 #endif
+
+
 
     ESP_LOGI("MAIN", "Initialization complete. Tasks are running.");
 
@@ -4484,6 +4937,10 @@ gpio_set_direction(CAM_PIN, GPIO_MODE_INPUT);
 
 ESP_ERROR_CHECK(init_polled_input(CAM_PIN, false));
 #endif
+
+//gpio_set_direction(ALERT_TYPE_PIN, GPIO_MODE_INPUT);
+//ESP_ERROR_CHECK(init_polled_input(ALERT_TYPE_PIN, false));
+
 
 
 #ifdef useVl53l5cx
@@ -4571,7 +5028,7 @@ ESP_LOGI(TAG, "VL53L5CX ULD ready! (Version: %s)", VL53L5CX_API_REVISION);
  xTaskCreatePinnedToCore(
                     ultrasonic_ranger,   /* Function to implement the task */
                     "ultrasonic_ranger", /* Name of the task */
-                    8192,      /* Stack size in words */
+                    1024 * 3,      /* Stack size in words */
                     NULL,       /* Task input parameter */
                     5,          /* Priority of the task */
                     &xHandle_ultrasonic,       /* Task handle. */
@@ -4599,13 +5056,18 @@ xTaskCreatePinnedToCore(
     xTaskCreate(uart_task, "UART Task", 4096, NULL, 5, NULL);
 #endif
 
+#ifdef useUart
+ init_uart();
+ #endif
+
+
     // Create sensor and data processing tasks
 #ifdef useAccelerometer
 ESP_LOGI("MAIN", "Creating task for Accelerometer");
 
  
-xTaskCreate(mpu9250_reader_task, "MPU Reader", 8192, mpu9250_dev_handle, 3, &xHandle_mpu);
-xTaskCreate(data_processor_task, "Data Processor", 8192, NULL, 3, &xHandle_mpu_processor);
+xTaskCreate(mpu9250_reader_task, "MPU Reader", 1024 * 3, mpu9250_dev_handle, 3, &xHandle_mpu);
+xTaskCreate(data_processor_task, "Data Processor", 1024 * 3, NULL, 3, &xHandle_mpu_processor);
     #endif
 
 // Static storage for task parameters
@@ -4639,6 +5101,76 @@ int count = 0;
     }
  #endif
 
+#ifdef useLunaX
+
+
+
+
+    tf_luna_queue = xQueueCreate(5, sizeof(tf_luna_data_t));
+    if (!tf_luna_queue) {
+        ESP_LOGE("TF_LUNA", "Queue creation failed");
+     //   return ESP_FAIL;
+    }
+
+    // Add TF-Luna device to I2C bus
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = TF_LUNA_ADDR, //0x10
+        .scl_speed_hz = 100000,
+    };
+    
+    esp_err_t ret2 = i2c_master_bus_add_device(bus_handle, &dev_cfg, &tf_luna_handle);
+    if (ret2 != ESP_OK) {
+        ESP_LOGE("TF_LUNA", "Device init failed: 0x%x", ret2);
+        vQueueDelete(tf_luna_queue);
+     //   return ret;
+    }
+ESP_LOGI("TF_LUNA", "Device added i2c_master_bus_add_device");
+
+     vTaskDelay(pdMS_TO_TICKS(200)); // Wait for the sensor to stabilize
+
+
+
+    // Create task
+
+    xTaskCreate(tf_luna_task, "tf_luna_task", 8192, NULL, TF_LUNA_TASK_PRIO, NULL);
+
+
+
+    BaseType_t task_ret = xTaskCreate(
+        tf_luna_task,
+        "tf_luna_task",
+        TF_LUNA_TASK_STACK,
+        NULL,
+        TF_LUNA_TASK_PRIO,
+        NULL
+    );
+  
+    if (task_ret != pdPASS) {
+        ESP_LOGE("TF_LUNA", "Task creation failed");
+        i2c_master_bus_rm_device(tf_luna_handle);
+        vQueueDelete(tf_luna_queue);
+       // return ESP_FAIL;
+    }
+    
+
+
+
+
+
+//ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &mpu9250_dev_cfg, &mpu9250_dev_handle));
+ //esp_err_t ret = i2c_master_bus_add_device(bus_handle, &dev_cfg, &tf_luna_handle);
+    // Initialize TF-Luna system
+ //   if (tf_luna_system_init() != ESP_OK) {
+  //      ESP_LOGE("MAIN", "Failed to initialize TF-Luna");
+ //       return;
+ //   }
+
+tf_luna_data_t latest;
+
+#endif
+
+
 #ifdef useAudio
 initPWMaudio2 ();
 /*
@@ -4647,23 +5179,16 @@ if (initPwmAudio () ){
 }
 */
 
-//initAudioSystem();
-//playAudio(500, 1000);
-//initAudioSystem();
-//ESP_LOGI("MAIN", "initAudioSystem done");
 
- //  alert_level_t level5 = ALERT_CLOSE;
-//  if (audioQueue) {
-       // xQueueSend(audioQueue, &level5, pdMS_TO_TICKS(10));
- //       playWarningToneAsync(level5, 200);
- //   }
+ESP_LOGI("MAIN", "initAudioSystem done");
 
- // ESP_LOGI(TAG, "Assistive Tech Alert System Booting (ESP-IDF v5.5)...");
+
   audioQueue = xQueueCreate(1, sizeof(alert_level_t));
   if (audioQueue == NULL) {
     ESP_LOGE(TAG, "Error creating the audioQueue  queue");
     return;
   }
+
  // configure_sdm_audio();
  // xTaskCreate(eventGeneratorTask, "EventGeneratorTask", 4096, NULL, 5, &eventGeneratorTaskHandle);
  // xTaskCreate(audioTask, "AudioTask", 4096, NULL, 5, &audioTaskHandle);
@@ -4677,7 +5202,7 @@ audio_mutex = xSemaphoreCreateMutex();
  xTaskCreatePinnedToCore(
                     audioTask,   /* Function to implement the task */
                     "AudioTask", /* Name of the task */
-                    4000,      /* Stack size in words */
+                    1024 * 3,      /* Stack size in words */
                     NULL,       /* Task input parameter */
                     4,          /* Priority of the task */
                     &audioTaskHandle,       /* Task handle. */
@@ -4693,5 +5218,104 @@ audio_mutex = xSemaphoreCreateMutex();
 #endif
 
 // blink_task_init(5, 500); // Blink 5 times with 500 ms interval
+
+//button_init(GPIO_NUM_40, GPIO_PULLUP_ONLY);
+    button_init(ALERT_TYPE_PIN, GPIO_PULLUP_ONLY); //pin 39
+
+    button_system_init();
+    //button_system_init();
+
+    button_event_t event;
+
+esp_err_t t_err = esp_timer_init();
+ if (t_err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to esp_timer_init: %s", esp_err_to_name(t_err));
+        }
+
+
+  static unsigned long start_time1 = esp_timer_get_time();
+  static unsigned long start_time2 = esp_timer_get_time();
+
+  /*
+  if(millis() - start_time >= 10*1000) {
+    do_some_work1();
+    start_time1 = millis();
+  }
+
+  if(millis() - start_time >= 20*1000) {
+    do_some_work2();
+    start_time2 = millis();
+  }
+*/
+
+
+        while(1) {
+
+
+uint32_t current_time =  esp_timer_get_time();
+
+
+
+ if(current_time - start_time1 >= 500) {
+ start_time1 =  esp_timer_get_time();
+
+        if (get_button_event(&event, 100)) { // 100ms timeout
+            ESP_LOGI("BUTTON", "Pin %d: %s", event.pin, event.new_state ? "PRESSED" : "RELEASED");
+
+
+ //           typedef struct {
+ //   uint8_t pin;
+ //  bool new_state;
+//} button_event_t;
+
+
+if (event.new_state == true && event.pin == ALERT_TYPE_PIN){
+useVibratorAlerts = !useVibratorAlerts;
+
+if(useVibratorAlerts){
+useAudioAlerts = false ;
+   }   else {
+useAudioAlerts = true ;
+    }
+}
+
+  } 
+            // Handle event
+        } // start_time
+
+
+#ifdef useLunaX
+
+ tf_luna_data_t data;
+
+if(current_time - start_time2 >= 700) {
+     start_time2 = esp_timer_get_time();
+
+
+ //tf_luna_read_with_retry(&data);
+ //ESP_LOGI("TF-LUNA", "Distance: %dcm | Strength: %d | Temp: %.1f°C", data.distance, data.strength, data.temperature);
+
+vTaskDelay(pdMS_TO_TICKS(200));
+
+        if (xQueueReceive(tf_luna_queue, &data, pdMS_TO_TICKS(1000)) == pdTRUE) {
+            ESP_LOGI("TF-LUNA", "Distance: %dcm | Strength: %d | Temp: %.1f°C",
+                    data.distance, data.strength, data.temperature);
+        }
+/*
+        if (tf_luna_get_latest(&latest)) {
+            ESP_LOGI("MAIN", "Distance: %dcm | Strength: %d | Temp: %.1fC",
+                    latest.distance, latest.strength, latest.temperature);
+        }
+       // vTaskDelay(pdMS_TO_TICKS(100));
+       */
+    }
+ #endif
+
+
+ //vTaskDelay(pdMS_TO_TICKS(100));
+
+    }
+
+
 
 }
