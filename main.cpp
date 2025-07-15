@@ -89,8 +89,8 @@
 #define useUltrasound 
 //#define useVl53l5cx
 //#define useUartA02YYUW
-#define useGPS
-//#define useGPS_2
+//#define useGPS
+
 //#define useXiaoCam
 //#define  useUart 
 #define useVibrator2
@@ -98,6 +98,9 @@
 //#define usePinPolling
 #define useLuna
 //#define use_old_i2c_driver
+
+#define debugMode
+
 
  // gyro
 #ifdef useAccelerometer
@@ -282,7 +285,7 @@ static const alert_config_t alert_configs[] = {
 
 #define centreAlert_WarnLevel 3
 
-#define acc_Move_limit 10
+#define acc_Move_limit 7
 static float last_pitch;
 static float last_roll;
 static bool vl53l5cx_running = false;
@@ -485,6 +488,133 @@ void vl53l5cx_reader_task(void *pvParameters);
 bool vl53l5cx_recover(VL53L5CX_Configuration *dev);
 
 
+#define CHECK_ERROR_CODE(returned, expected) ({                        \
+            if(returned != expected){                                  \
+                printf("TWDT ERROR\n");                                \
+                abort();                                               \
+            }                                                          \
+})
+
+
+// Helper function to print CPU stats
+void print_cpu_stats() {
+    // Use std::vector for automatic memory management (better C++ practice)
+    std::vector<TaskStatus_t> taskStatusArray;
+    UBaseType_t taskCount = uxTaskGetNumberOfTasks();
+    
+    // Resize vector to hold all tasks
+    taskStatusArray.resize(taskCount);
+    
+    uint32_t totalRuntime;
+    taskCount = uxTaskGetSystemState(
+        taskStatusArray.data(),   // Use vector's data pointer
+        taskCount,
+        &totalRuntime
+    );
+    
+    // Print header
+    ESP_LOGI("CPU STATS", "Task\t\t%%CPU\tStack High Water Mark");
+    
+    // Print stats for each task
+    for (UBaseType_t x = 0; x < taskCount; x++) {
+        const auto& task = taskStatusArray[x];
+        uint32_t cpuPercent = totalRuntime > 0 ? 
+            (task.ulRunTimeCounter * 100 / totalRuntime) : 0;
+        
+        ESP_LOGI("CPU STATS", "%-12s\t%2u%%\t%u bytes", 
+                task.pcTaskName,
+                cpuPercent,
+                task.usStackHighWaterMark);
+    }
+}
+
+
+class CPUMonitor {
+public:
+    // Constructor with configurable interval (seconds)
+    explicit CPUMonitor(uint32_t interval_seconds = 1) {
+        // Convert seconds to microseconds for esp_timer
+        interval_us = interval_seconds * 1000000;
+        
+        // Configure timer
+        esp_timer_create_args_t timer_config = {
+            .callback = &timer_callback,
+            .arg = this,
+            .name = "cpu_monitor"
+        };
+        
+        ESP_ERROR_CHECK(esp_timer_create(&timer_config, &timer));
+        ESP_ERROR_CHECK(esp_timer_start_periodic(timer, interval_us));
+        ESP_LOGI("CPUMonitor", "Started with %u second interval", interval_seconds);
+    }
+
+    // Destructor for cleanup
+    ~CPUMonitor() {
+        esp_timer_stop(timer);
+        esp_timer_delete(timer);
+    }
+
+private:
+    esp_timer_handle_t timer;
+    uint64_t interval_us;
+
+    // Static callback function (required by esp_timer)
+    static void timer_callback(void* arg) {
+        // Cast arg back to CPUMonitor instance
+        CPUMonitor* monitor = static_cast<CPUMonitor*>(arg);
+        print_cpu_stats(); // Or monitor->print_stats() if non-static
+    }
+
+    // Your stats printing function (can be moved here)
+    static void print_cpu_stats() {
+        // ... your existing stats implementation ...
+
+            constexpr size_t NUM_TASKS = 16;
+    TaskStatus_t tasks[NUM_TASKS];
+    UBaseType_t numTasks = uxTaskGetSystemState(tasks, NUM_TASKS, nullptr);
+    
+    for(UBaseType_t i=0; i<numTasks; i++) {
+        ESP_LOGI("TASK", "%-12s Prio: %2u | State: %c | Stack: %u", 
+            tasks[i].pcTaskName,
+            tasks[i].uxCurrentPriority,
+            "RBDS"[tasks[i].eCurrentState], // R=Running, B=Blocked, etc.
+            tasks[i].usStackHighWaterMark);
+    }
+
+    }
+};
+
+
+
+void cpu_stats_timer_callback(void *arg) {
+    print_cpu_stats();
+}
+
+void start_cpu_monitor() {
+    const esp_timer_create_args_t periodic_timer_args = {
+        .callback = &cpu_stats_timer_callback,
+        .name = "cpu_stats_timer"
+    };
+    
+    esp_timer_handle_t periodic_timer;
+    ESP_ERROR_CHECK(esp_timer_create(&periodic_timer_args, &periodic_timer));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, 5 * 1000000)); // Every 5 seconds
+}
+
+void print_enhanced_stats() {
+    constexpr size_t NUM_TASKS = 16;
+    TaskStatus_t tasks[NUM_TASKS];
+    UBaseType_t numTasks = uxTaskGetSystemState(tasks, NUM_TASKS, nullptr);
+    
+    for(UBaseType_t i=0; i<numTasks; i++) {
+        ESP_LOGI("TASK", "%-12s Prio: %2u | State: %c | Stack: %u", 
+            tasks[i].pcTaskName,
+            tasks[i].uxCurrentPriority,
+            "RBDS"[tasks[i].eCurrentState], // R=Running, B=Blocked, etc.
+            tasks[i].usStackHighWaterMark);
+    }
+}
+
 #ifdef useLuna
 
 /*
@@ -540,14 +670,19 @@ typedef struct {
     float temperature;
 } sensor_data_t;
 
-   static i2c_master_dev_handle_t tf_luna_handle = NULL;
+//   static i2c_master_dev_handle_t tf_luna_handle = NULL;
+static bool i2c_started = false;
+
 
 static void initialize_i2c(void) {
 
     i2c_mutex = xSemaphoreCreateMutex();
     assert(i2c_mutex != NULL);
 
-
+    if (i2c_started){
+        // for reinit
+esp_err_t i2c_del_master_bus(i2c_master_bus_handle_t bus_handle);
+    }
  //   ESP_ERROR_CHECK(i2c_del_master_bus(bus_handle));
  //   ESP_LOGI(TAG, "I2C de-initialized successfully");
 
@@ -590,6 +725,7 @@ static void initialize_i2c(void) {
  // i2c_master_bus_handle_t bus_handle;
     ESP_ERROR_CHECK(i2c_new_master_bus(&i2c_mst_config, &bus_handle));
 
+i2c_started = true;
     /*
        // 3. Add TF-Luna device
     i2c_device_config_t dev_cfg = {
@@ -694,10 +830,11 @@ ret = i2c_master_receive(tf_luna_handle, response, DATA_LENGTH, 1000);
 }
 #endif
 
+
 ///////////////////// rolling average
 
 #define WINDOW_SIZE 5       // Number of samples in rolling window
-#define CHANGE_THRESHOLD 4 // Minimum cm change to trigger detection (adjust as needed)
+#define CHANGE_THRESHOLD 10 // Minimum cm change to trigger detection (adjust as needed)
 
 typedef struct {
     uint16_t buffer[WINDOW_SIZE];
@@ -738,7 +875,66 @@ bool update_rolling_avg(rolling_avg_t *ravg, uint16_t new_dist, uint16_t *avg_ou
 }
 
 
+bool Luna_writeRegister(uint8_t reg, uint8_t value, i2c_master_dev_handle_t tfl_handle) {
+ //   Wire.beginTransmission(addr);
+   // Wire.write(reg);
+  //  Wire.write(value);
+// soft reset 0x02
+// har reset 0x01
+//#define TFLUNA_I2C_SOFT_RESET      0x21
+// I2C registers
+/*
+#define TFLUNA_I2C_DIST_L          0x00
+#define TFLUNA_I2C_DIST_H          0x01
+#define TFLUNA_I2C_STRENGTH_L      0x02
+#define TFLUNA_I2C_STRENGTH_H      0x03
+#define TFLUNA_I2C_TEMP_L          0x04
+#define TFLUNA_I2C_TEMP_H          0x05
+#define TFLUNA_I2C_FIRMWARE_L      0x0A
+#define TFLUNA_I2C_FIRMWARE_M      0x0B
+#define TFLUNA_I2C_FIRMWARE_H      0x0C
+#define TFLUNA_I2C_SAVE_SETTINGS   0x20
+#define TFLUNA_I2C_SOFT_RESET      0x21
+#define TFLUNA_I2C_SET_I2C_ADDR    0x22
+#define TFLUNA_I2C_FRAME_RATE      0x25
+#define TFLUNA_I2C_TRIG_MODE       0x40
+#define TFLUNA_I2C_CONT_MODE       0x41
+#define TFLUNA_I2C_TRIG_SAMPLE     0x42
+#define TFLUNA_I2C_ENABLE          0x60
+#define TFLUNA_I2C_DISABLE         0x65
+*/
+    uint8_t cmd[3] = {0x5A, reg, value};
+
+
+esp_err_t ret = i2c_master_transmit(tfl_handle, cmd, sizeof(cmd), pdMS_TO_TICKS(1000));
+            if(ret == ESP_OK) {
+                ESP_LOGI("TF-LUNA", "i2c_master_transmit ok");
+vTaskDelay(pdMS_TO_TICKS(10));
+            } else {
+ESP_LOGE("TF-LUNA", "i2c_master_transmit fail");
+     return false;       
+            }
+    //if (Wire.endTransmission() != 0) {
+     //   _errorCode = TFLUNA_ERROR_I2C_NACK;
+       // return false;
+   // }
+   for (int i = 0; i <10; i++){
+ ESP_LOGI("TF-LUNA", "reset");   
+   }
+
+    //_errorCode = TFLUNA_OK;
+    return true;
+}
+
+
+
 void tf_luna_task(void *arg) {
+
+
+    // Remove watchdog monitoring of IDLE task
+  //  esp_task_wdt_delete(xTaskGetIdleTaskHandleForCPU(0));
+    // Add the current task to the monitoring list
+    esp_task_wdt_add(NULL);
 
     i2c_device_config_t dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
@@ -757,42 +953,176 @@ void tf_luna_task(void *arg) {
     vTaskDelay(pdMS_TO_TICKS(200));  // Critical startup delay
 
     uint8_t cmd[5] = {0x5A, 0x05, 0x00, 0x01, 0x60};
+
+
+       if(xSemaphoreTake(i2c_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+
+
+            esp_err_t ret_init = i2c_master_transmit(tfl_handle, cmd, sizeof(cmd), pdMS_TO_TICKS(1000));
+            if(ret_init == ESP_OK) {
+                ESP_LOGD("TF-LUNA", "i2c_master_transmit ok");
+vTaskDelay(pdMS_TO_TICKS(10));
+            } else {
+                ESP_LOGE("TF-LUNA", "i2c_master_transmit error");
+            }
+     xSemaphoreGive(i2c_mutex);
+        }
+/*
+
+    DEFAULT_I2C_ADDR = 0x10  # default I2C address = 16
+    DEFAULT_FPS = 0x64  # default frame-rate = 100fps
+
+    # Register Names and Numbers #
+    DIST_LO = 0x00  # R - Unit: cm
+    DIST_HI = 0x01  # R
+    AMP_LO = 0x02  # R - Amplitude of reading
+    AMP_HI = 0x03  # R
+    TEMP_LO = 0x04  # R - Unit: 0.01 Celsius
+    TEMP_HI = 0x05  # R
+    TICK_LO = 0x06  # R - Ticks since startup
+    TICK_HI = 0x07  # R
+    ERROR_LO = 0x08  # R - Error number
+    ERROR_HI = 0x09  # R
+    VERSION_REVISION = 0x0A  # R
+    VERSION_MINOR = 0x0B  # R
+    VERSION_MAJOR = 0x0C  # R
+    SERIAL_NUMBER = 0x10  # 0x10 to Ox1D, 14 bytes ASCII Codes
+    SIGNATURE = 0x3C  # 4 byte signature
+        SAVE_SETTINGS = 0x20  # W -- Write 0x01 to save
+    COMMIT = 0x01   # use to write settings
+    REBOOT = 0x21   # W -- Write 0x02 to reboot.
+                    # Lidar not accessible during few seconds,
+                    # then register value resets automatically
+    REBOOT_CODE = 0x02
+    MODE = 0x23  # W/R -- 0x00=continuous, 0x01=trigger
+    MODE_CONTINUOUS = 0x00
+    MODE_TRIGGER = 0x01
+    TRIG_ONE_SHOT = 0x24  # W  --  0x01=trigger once (only in trigger mode)
+
+    ENABLED = 0x25  # W/R -- 0x01=enable, 0x00=disable (labeled enable in manual)
+
+    FPS_LO = 0x26  # W/R -- lo byte
+    FPS_HI = 0x27  # W/R -- hi byte
+
+    LOW_POWER = 0x28  # W/R -- 0x00-normal, 0x01-low power
+
+    RESTORE_FACTORY_DEFAULTS = 0x29  # W  --  0x01-restore factory settings
+
+    AMP_THR_LO = 0x2A  # W/R Amplitude threshold level
+    AMP_THR_HI = 0x2B  # W/R Amplitude threshold level
+    DUMMY_DIST_LO = 0x2C  # W/R dummy distance level
+    DUMMY_DIST_HI = 0x2D  # W/R dummy distance level
+    MIN_DIST_LO = 0x2E  # W/R Minimum distance level in cm
+    MIN_DIST_HI = 0x2F  # W/R Minimum distance level in cm
+    MAX_DIST_LO = 0x30  # W/R Maximum distance level in cm
+    MAX_DIST_HI = 0x31  # W/R Maximum distance level in cm
+
+
+*/
+
     uint8_t data[9];
+
+  //esp_task_wdt_delete(NULL);
+
     
+for (;;) {
+
+
+     // Feed the dog regularly
+        esp_task_wdt_reset();
+
+
+            uint32_t notification_value = 0;
+
+        // 1. Wait indefinitely for any notification (e.g., the START signal)
+        // This call will block until xTaskNotify is called on this task.
+        xTaskNotifyWait(0,           /* Don't clear any bits on entry */
+                        ULONG_MAX,   /* Clear all bits on exit */
+                        &notification_value, /* Stores the notification value */
+                        pdMS_TO_TICKS(1000));      /* Block forever */
+
+        // 2. Check if the START signal was received
+        if (notification_value & START_BIT) {
+            ESP_LOGI(TAG, "START signal for luna reading loop 1.");
+
+ //esp_task_wdt_add(NULL);  
+
     while(1) {
 
    uint16_t distance, flux;
     int16_t temp;
+esp_err_t ret;
+ESP_ERROR_CHECK(esp_task_wdt_reset());
 
-        if(xSemaphoreTake(i2c_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        if(xSemaphoreTake(i2c_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
 
 
-            esp_err_t ret = i2c_master_transmit(tfl_handle, cmd, sizeof(cmd), pdMS_TO_TICKS(1000));
-            if(ret == ESP_OK) {
-                ESP_LOGD("TF-LUNA", "i2c_master_transmit ok");
-//vTaskDelay(pdMS_TO_TICKS(100));
+           ret = i2c_master_transmit(tfl_handle, cmd, sizeof(cmd), pdMS_TO_TICKS(1000));
+           if(ret == ESP_OK) {
+              ESP_LOGD("TF-LUNA", "i2c_master_transmit ok");
+            } else {
+                ESP_LOGE("TF-LUNA", "i2c_master_transmit failed");
+            }
+vTaskDelay(pdMS_TO_TICKS(50));
 
 
                 ret = i2c_master_receive(tfl_handle, data, sizeof(data), pdMS_TO_TICKS(1000));
                 if(ret == ESP_OK) {
                    ESP_LOGD("TF-LUNA", "i2c_master_receive ok");
+                } else {
+                ESP_LOGE("TF-LUNA", "i2c_master_receive failed");
+            }
     distance = (uint16_t) data[2] + (data[3] << 8);
     flux = (uint16_t) data[4] + (data[5] << 8);
     temp = (int16_t) (data[6] + (data[7] << 8)) / 8.0f - 256.0f;
-    
+    //error = tfluna.error
                 ESP_LOGI("TF-LUNA", "Dist: %dcm, Flux: %d, Temp: %dC", 
                     distance, flux, temp);
 
 
 if (distance > 50000){ // error
+// TF-LUNA: Dist: 65535cm, Flux: 65535, Temp: -256C
+        alert_level_t level = ALERT_LIDAR;
+        for (int i = 0; i <= 10; i++){
+xQueueSend(audioQueue, &level, pdMS_TO_TICKS(1000));
+        }
+
+initialize_i2c();
+
 
 ESP_LOGE("TF-LUNA", "Distance wrong, reinit Luna: %d", distance);
+bool reg_success = Luna_writeRegister(0x21, 0x01, tfl_handle);
 
-   ESP_ERROR_CHECK(i2c_master_bus_rm_device(tfl_handle));
+if (reg_success){
+ ESP_LOGI("TF-LUNA", "Luna_writeRegister success");
+} else {
+    ESP_LOGE("TF-LUNA", "Luna_writeRegister failed");
+}
+vTaskDelay(pdMS_TO_TICKS(500));
 
-    vTaskDelay(pdMS_TO_TICKS(500));
- ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &dev_cfg, &tfl_handle));
+ //   REBOOT = 0x21   # W -- Write 0x02 to reboot.
+  //                  # Lidar not accessible during few seconds,
+  //                  # then register value resets automatically
+//    REBOOT_CODE = 0x02
+  //  uint8_t reboot_cmd[2] = {0x21, 0x02};
+//esp_err_t ret = i2c_master_transmit(tfl_handle, reboot_cmd, sizeof(reboot_cmd), pdMS_TO_TICKS(1000));
+//error = self._write_byte(0x21, TfLunaI2C.REBOOT_CODE)
+ //       return error
 
+
+//esp_restart();
+
+
+ //  ESP_ERROR_CHECK(i2c_master_bus_rm_device(tfl_handle));
+ //     ESP_ERROR_CHECK(i2c_master_bus_rm_device(mpu9250_dev_handle));
+   
+ //  initialize_i2c();
+
+//ESP_ERROR_CHECK(esp_task_wdt_reset());
+  //  vTaskDelay(pdMS_TO_TICKS(500));
+// ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &dev_cfg, &tfl_handle));
+//ESP_ERROR_CHECK(i2c_master_bus_add_device(bus_handle, &mpu9250_dev_cfg, &mpu9250_dev_handle));
+ //   ESP_LOGI("I2C", "Device MPU9250 added to bus");
 }
 
 
@@ -803,13 +1133,15 @@ bool changed = update_rolling_avg(&avg, distance, &current_avg);
                 ESP_LOGI("DETECTION", "Sudden change! Raw: %dcm, Avg: %dcm", distance, current_avg);
                 // Take action (e.g., trigger alert)
 
+ // Feed the dog regularly
+        esp_task_wdt_reset();
 
 alert_level_t luna_alert = (alert_level_t) ALERT_LIDAR;
 update_beeper_alerts(luna_alert, 3);
             }
 
 
-                }
+            //    }
 
          // alert_level = get_alert_level( distance, 200);
    //  printf("sens1 get_alert_level %lu\n", distance);
@@ -825,7 +1157,7 @@ update_beeper_alerts(luna_alert, 3);
 
 
 
-            }
+          //  }
             xSemaphoreGive(i2c_mutex);
             
             if(ret != ESP_OK) {
@@ -835,8 +1167,48 @@ update_beeper_alerts(luna_alert, 3);
         } else {
             ESP_LOGE("TF-LUNA", "no mutex");
         }
+
+
+               // --- Check for a STOP signal ---
+                uint32_t stop_signal_value = 0;
+                // Use a zero timeout to check instantly without blocking
+                xTaskNotifyWait(0, ULONG_MAX, &stop_signal_value, 0);
+
+                // 3. If a STOP signal was sent, break the inner loop
+                if (stop_signal_value & STOP_BIT) {
+                    if (esp_task_wdt_status(NULL)){
+                        esp_task_wdt_delete(NULL);
+                    }
+
+                     
+                   // ESP_ERROR_CHECK(esp_task_wdt_reset()); //reset watchdo when idle
+                    ESP_LOGI(TAG, "STOP signal for luna loop.");
+                    break; // Exit the inner "running" loop
+                }
+ // Feed the dog regularly
+        esp_task_wdt_reset();
+
         vTaskDelay(pdMS_TO_TICKS(200));
-    }
+    } // main loop
+
+
+ // Feed the dog regularly
+        esp_task_wdt_reset();
+     
+
+} // notify 
+
+ // Feed the dog regularly
+        esp_task_wdt_reset();
+
+} // wait for notify
+    // Restore IDLE task monitoring when the task ends
+       if (esp_task_wdt_status(NULL)){
+                        esp_task_wdt_delete(NULL);
+                    }
+
+
+ //   esp_task_wdt_add(xTaskGetIdleTaskHandleForCPU(0));
 }
 
 
@@ -1614,7 +1986,7 @@ void gps_task(void *arg)
 
 for (;;) {
    
-esp_task_wdt_delete(NULL); 
+
 //    ESP_ERROR_CHECK(esp_task_wdt_reset());
 
             uint32_t notification_value = 0;
@@ -1632,6 +2004,7 @@ esp_task_wdt_delete(NULL);
 
 
 ESP_LOGI("GPS", "GPS starting");
+esp_task_wdt_add(NULL);
 
 ESP_LOGD("GPS", "GPS Waiting for uart_mutex ...");
 if (xSemaphoreTake(uart_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -1653,7 +2026,8 @@ vTaskDelay(pdMS_TO_TICKS(100));
         ESP_LOGI("GPS", "Date:%d/%d/%d Time:%d:%d:%d",gps_data.day, gps_data.month, gps_data.year, gps_data.hour, gps_data.minute,gps_data.second); 
 // Date:25/6/28 Time:15:34:42
        // ESP_LOGI(TAG, "======================================================\n");
-         vTaskDelay(2000);
+       ESP_ERROR_CHECK(esp_task_wdt_reset());
+         vTaskDelay(200);
        // vTaskDelay(1000 / portTICK_RATE_MS);
 
                       // --- CRITICAL PART: Check for a STOP signal ---
@@ -1664,9 +2038,10 @@ vTaskDelay(pdMS_TO_TICKS(100));
                 // 3. If a STOP signal was sent, break the inner loop
                 if (stop_signal_value & STOP_BIT) {
                     ESP_LOGI(TAG, "STOP signal for GPS loop.");
+                    esp_task_wdt_delete(NULL); 
                     break; // Exit the inner "running" loop
                 }
-//esp_task_wdt_add(NULL);
+
     }
 
     xSemaphoreGive(uart_mutex);
@@ -1676,7 +2051,7 @@ ESP_LOGD("GPS", "GPS Giving uart_mutex ...");
 } // startbit
 //vTaskDelay(pdMS_TO_TICKS(800));
 
-esp_task_wdt_add(NULL);
+//esp_task_wdt_add(NULL);
 } // outer loop wait for startbit
 
 }
@@ -1780,7 +2155,10 @@ void play_wav_from_flash(alert_level_t alert_level) {
 
  // ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
          
-
+// Remove watchdog monitoring of IDLE task
+   // esp_task_wdt_delete(xTaskGetIdleTaskHandleForCPU(0));
+    // Add the current task to the monitoring list
+    esp_task_wdt_add(NULL);
 
     /*
    pwm_audio_config_t pac;
@@ -1807,11 +2185,11 @@ pwm_audio_set_param(32000, (ledc_timer_bit_t) 16, 1);
   pwm_audio_start();
 */
   switch (alert_level) {
-    case 8:   pwm_audio_set_volume(10); break;
-        case 7:   pwm_audio_set_volume(10); break;
-        case 6:   pwm_audio_set_volume(10); break;
-          case 5:    pwm_audio_set_volume(8); break;
-          case 4: pwm_audio_set_volume(6); break;
+    case 8:   pwm_audio_set_volume(5); break;
+        case 7:   pwm_audio_set_volume(6); break;
+        case 6:   pwm_audio_set_volume(7); break;
+          case 5:    pwm_audio_set_volume(5); break;
+          case 4: pwm_audio_set_volume(4); break;
           case 3: pwm_audio_set_volume(4); break;
           case 2:   pwm_audio_set_volume(1); break;
           case 1: pwm_audio_set_volume(1); break;
@@ -1859,7 +2237,7 @@ if (sound == 1){
     target_sample_rate = original_sample_rate * pitch_factor;
       pwm_audio_set_param(target_sample_rate, (ledc_timer_bit_t)16, 1);
     pwm_audio_start();
-  pwm_audio_write((uint8_t*)aurora_slow, sizeof(aurora_slow), &bytes_written, portMAX_DELAY);
+  pwm_audio_write((uint8_t*)aurora_slow, sizeof(aurora_slow), &bytes_written, pdMS_TO_TICKS(1000));
 
 } else {
  // Use the signal sample
@@ -1868,7 +2246,7 @@ if (sound == 1){
     target_sample_rate = original_sample_rate * pitch_factor;
       pwm_audio_set_param(target_sample_rate, (ledc_timer_bit_t)16, 1);
     pwm_audio_start();
-      pwm_audio_write((uint8_t*)signal1, sizeof(signal1), &bytes_written, portMAX_DELAY);
+      pwm_audio_write((uint8_t*)signal1, sizeof(signal1), &bytes_written, pdMS_TO_TICKS(1000));
 
 }
    
@@ -1914,11 +2292,21 @@ if (sound == 1){
    // vTaskDelay(pdMS_TO_TICKS(duration_ms + 50)); // Wait for it to play + grace period
 */
     // Clean up
-
+esp_task_wdt_reset();
  vTaskDelay(pdMS_TO_TICKS(actual_duration + 5 )); // Wait for it to play + grace period
+esp_task_wdt_reset();
 
     pwm_audio_stop();
     ESP_LOGD(TAG, "Playback finished.");
+
+ // Restore IDLE task monitoring when the task ends
+    if (esp_task_wdt_status(NULL)){
+                        esp_task_wdt_delete(NULL);
+                    }
+
+   // esp_task_wdt_delete(NULL);
+  //  esp_task_wdt_add(xTaskGetIdleTaskHandleForCPU(0));
+
 }
 
 
@@ -2044,7 +2432,7 @@ uint32_t sample_rate_2 = 32000;
     }
 
 
-if (xSemaphoreTake(audio_mutex, portMAX_DELAY) == pdTRUE) {
+if (xSemaphoreTake(audio_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
  ESP_LOGD(TAG, "audio Got mutex .");
 
 
@@ -2162,7 +2550,7 @@ if (i % (divider) == 0 && i < halfway && volume < 15){
     // 5. Write the generated audio data to the player's ring buffer
     size_t bytes_written;
     // 'portMAX_DELAY' will block until all data is written to the buffer
-    pwm_audio_write(sine_wave_buffer, total_samples, &bytes_written, portMAX_DELAY);
+    pwm_audio_write(sine_wave_buffer, total_samples, &bytes_written, pdMS_TO_TICKS(1000));
 
     // If not all bytes could be written, it indicates an issue (e.g., buffer too small)
     if (bytes_written < total_samples) {
@@ -2350,9 +2738,9 @@ void audioTask(void *parameter) {
 
   ESP_LOGI(TAG, "Audio Task started");
 
-//ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
-   esp_task_wdt_delete(NULL); 
+ //  esp_task_wdt_delete(NULL); 
   
 
   for (;;) {
@@ -2367,18 +2755,21 @@ last_update_time = current_time;
 */
 //ESP_ERROR_CHECK(esp_task_wdt_reset());
 
-   if (xQueueReceive(audioQueue, &received_alert_level, portMAX_DELAY) == pdTRUE) {
+ESP_ERROR_CHECK(esp_task_wdt_reset());
+
+   if (xQueueReceive(audioQueue, &received_alert_level, pdMS_TO_TICKS(1000)) == pdTRUE) {
       //if (received_alert_level != last_played_level) {
         ESP_LOGD(TAG, "Audio task: Playing alert for level %d", received_alert_level);
         last_played_level = received_alert_level;
 
 
-if (xSemaphoreTake(audio_mutex, portMAX_DELAY) == pdTRUE) {
+if (xSemaphoreTake(audio_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
  
 //ESP_ERROR_CHECK(esp_task_wdt_reset());
-
+//  esp_task_wdt_add(NULL);
+ESP_ERROR_CHECK(esp_task_wdt_reset());
  play_wav_from_flash(received_alert_level) ;
-
+ESP_ERROR_CHECK(esp_task_wdt_reset());
 
  //       switch (received_alert_level) {
  //   play_sine_tone
@@ -2456,22 +2847,27 @@ if (xSemaphoreTake(audio_mutex, portMAX_DELAY) == pdTRUE) {
       }
           */
  //   }
-
+ESP_ERROR_CHECK(esp_task_wdt_reset());
    xSemaphoreGive(audio_mutex);
 } else {
 ESP_LOGE(TAG, "No audio_mutex available");
+ESP_ERROR_CHECK(esp_task_wdt_reset());
 
 }
 
 
  } // got queue message
+ESP_ERROR_CHECK(esp_task_wdt_reset());
 
-   vTaskDelay(pdMS_TO_TICKS(10));
+vTaskDelay(pdMS_TO_TICKS(10));
 
 } // loop
+    if (esp_task_wdt_status(NULL)){
+            esp_task_wdt_delete(NULL);
+    }
 
 
-  esp_task_wdt_add(NULL);
+
 }
 
 
@@ -2670,7 +3066,10 @@ QueueHandle_t mpu_data_queue;
 void mpu9250_reader_task(void *pvParameters)
 {
 
- //   ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+
+// esp_task_wdt_delete(xTaskGetIdleTaskHandleForCPU(0));
+
+   ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
   
  // ESP_ERROR_CHECK(i2c_param_config(I2C_MASTER_NUM, &conf));
   //   vTaskDelay(pdMS_TO_TICKS(200));  // Critical startup delay
@@ -2678,7 +3077,7 @@ void mpu9250_reader_task(void *pvParameters)
   // ESP_ERROR_CHECK(i2c_driver_install(I2C_MASTER_NUM, conf.mode, 0, 0, 0));
  // vTaskDelay(pdMS_TO_TICKS(200));  // Critical startup delay
 
-     esp_task_wdt_delete(NULL); 
+  //   esp_task_wdt_delete(NULL); 
 
 
 
@@ -2697,12 +3096,9 @@ void mpu9250_reader_task(void *pvParameters)
     ESP_LOGI("MPU9250_TASK", "Fusion task started.");
    vTaskDelay(pdMS_TO_TICKS(100));
 static int mpu9250_update_period = 50;
+
     while (1)
     {
-
-   //       ESP_ERROR_CHECK(esp_task_wdt_reset());
-
-        
 
 
 
@@ -2720,30 +3116,32 @@ if (current_time - last_update_time > mpu9250_update_period ) {
  
         ESP_LOGD("MPU9250_TASK", "mpu9250 updating");
 
-           if (xSemaphoreTake(i2c_mutex, portMAX_DELAY) == pdTRUE) {
+           if (xSemaphoreTake(i2c_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
 
 mpu_hasMutex = true;
+
+
+ESP_ERROR_CHECK(esp_task_wdt_reset());
 
 
   ESP_LOGD("MUTEX2", "mpu9250 i2c_mutex Mutex taken.");
 
   ESP_LOGD("MPU9250_TASK", "Doing mi2c_master_transmit_receive");
 
-#ifndef use_old_i2c_driver
+
         esp_err_t err = i2c_master_transmit_receive(
             mpu9250_dev_handle,
             (const uint8_t[]){MPU9250_ACCEL_XOUT_H_REG_ADDR},
             1,
             raw_data,
             14,
-            pdMS_TO_TICKS(100)
+            pdMS_TO_TICKS(200)
         );
 
-        if (err == ESP_OK)
-        {
+        if (err == ESP_OK){
 
               ESP_LOGD("MPU9250_TASK", "mi2c_master_transmit_receive success");
-#endif
+
             // --- Parse raw data and convert to physical units ---
             int16_t raw_accel_x = (raw_data[0] << 8) | raw_data[1];
             int16_t raw_accel_y = (raw_data[2] << 8) | raw_data[3];
@@ -2752,6 +3150,8 @@ mpu_hasMutex = true;
             int16_t raw_gyro_x  = (raw_data[8] << 8) | raw_data[9];
             int16_t raw_gyro_y  = (raw_data[10] << 8) | raw_data[11];
             int16_t raw_gyro_z  = (raw_data[12] << 8) | raw_data[13];
+
+             
 
             // Convert raw values
             sensor_data.accel_x_g = (float)raw_accel_x / ACCEL_SCALE_FACTOR;
@@ -2781,10 +3181,7 @@ mpu_hasMutex = true;
             
             xQueueSend(mpu_data_queue, &sensor_data, 0);
 
-        } else {
-            xSemaphoreGive(i2c_mutex);
-            ESP_LOGE("MPU9250_TASK", "Failed to read sensor data: %s", esp_err_to_name(err));
-        }
+       
 
 //////  fall detection
     float total_accel_magnitude = sqrtf(
@@ -2792,7 +3189,7 @@ mpu_hasMutex = true;
         sensor_data.accel_y_g * sensor_data.accel_y_g +
         sensor_data.accel_z_g * sensor_data.accel_z_g
     );
- ESP_LOGD("MPU9250_TASK", "total_accel_magnitude: %f", total_accel_magnitude);
+ ESP_LOGI("MPU9250_TASK", "total_accel_magnitude: %f", total_accel_magnitude);
 
 
 
@@ -2807,24 +3204,38 @@ mpu_hasMutex = true;
 
     // You could trigger an alert here or set a flag for another task to see.
     }
-
+} else {
+            xSemaphoreGive(i2c_mutex);
+             vTaskDelay(pdMS_TO_TICKS(500));
+            ESP_LOGE("MPU9250_TASK", "Failed to read MPU9250 sensor data: %s", esp_err_to_name(err));
+        }
                
 //if (mpu_hasMutex){
             xSemaphoreGive(i2c_mutex);
             mpu_hasMutex = false;
-              ESP_LOGD("MUTEX2", "mpu9250 g_i2c_bus Mutex given.");
+              ESP_LOGD("MUTEX2", "mpu9250 i2c_mutex Mutex given.");
 //}
       
-    }
+    } else {
+ ESP_LOGE("MUTEX2", "No i2c_mutex Mutex to take.");
 
+    }
+ vTaskDelay(pdMS_TO_TICKS(10));
 } // mpu9250_update_period
 
 
 //xSemaphoreGive(g_i2c_bus_mutex);
-   vTaskDelay(pdMS_TO_TICKS(100));
+   vTaskDelay(pdMS_TO_TICKS(10));
 }
-    
-    esp_task_wdt_add(NULL);   
+
+                    if (esp_task_wdt_status(NULL)){
+                        esp_task_wdt_delete(NULL);
+                    }
+
+
+   // esp_task_wdt_delete(NULL);
+ //   esp_task_wdt_add(xTaskGetIdleTaskHandleForCPU(0));    
+ //   esp_task_wdt_add(NULL);   
 }
 #endif
 
@@ -2834,40 +3245,31 @@ mpu_hasMutex = true;
  *        This task demonstrates how to correctly access the fused orientation data.
  */
 
-void data_processor_task(void *pvParameters)
+void data_processor_taskX(void *pvParameters)
 {
-
-      //  ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
-  // esp_task_wdt_delete(NULL); 
-  
-
 
     mpu_data_t received_data;
     ESP_LOGI("PROCESSOR_TASK", "Task started, waiting for data.");
 
+//esp_task_wdt_delete(xTaskGetIdleTaskHandleForCPU(0));
+esp_task_wdt_add(NULL);
+
     while (1)
     {
 
- //         ESP_ERROR_CHECK(esp_task_wdt_reset());
+esp_task_wdt_reset();
 
         // Wait indefinitely until an item is available on the queue.
-        if (xQueueReceive(mpu_data_queue, &received_data, portMAX_DELAY) == pdPASS)
+        if (xQueueReceive(mpu_data_queue, &received_data, pdMS_TO_TICKS(1000)) == pdPASS)
         {
 
+   volatile uint32_t stack_margin = uxTaskGetStackHighWaterMark(NULL); // Initial margin
+    ESP_LOGI("STACK", "Start margin: %u", stack_margin);
 
        
 // ESP_ERROR_CHECK(esp_task_wdt_reset());
 
  ESP_LOGD("PROCESSOR_TASK", "received data.");
-/*
-         straight    Pitch: -25.00°, Roll: 159.13° 
-          up   Pitch: -48.69°, Roll: 124.07°
-        down Pitch: -53.90°, Roll: 179.25°
-        lean right: Pitch: -14.88°, Roll: 186.32°
-        lean left: Pitch: -40.04°, Roll: 130.50°
-turn right: Pitch: -38.04°, Roll: 161.72°
-turn left: Pitch: -68.80°, Roll: 162.69°
-*/
 
 
 /*
@@ -2892,7 +3294,7 @@ uint32_t current_time = xTaskGetTickCount();
 
 if ( abs(received_data.pitch -  last_pitch ) > acc_Move_limit || abs(received_data.roll -  last_roll) > acc_Move_limit ) {
 
- ESP_LOGI("PROCESSOR_TASK", "Device is moved %.1f  %.1f current_time: %d last_movement: %d", abs(received_data.pitch -  last_pitch ), abs(received_data.roll -  last_roll), current_time, last_movement   );
+// ESP_LOGI("PROCESSOR_TASK", "Device is moved %.1f  %.1f current_time: %d last_movement: %d",  abs(received_data.pitch -  last_pitch ), abs(received_data.roll -  last_roll), current_time, last_movement   );
 
 #ifdef useAudio
 //update_beeper_alerts(ALERT_MEDIUMFAR, 1);
@@ -2926,6 +3328,12 @@ if ( abs(received_data.pitch -  last_pitch ) > acc_Move_limit || abs(received_da
  ESP_LOGI("PROCESSOR_TASK", "Sending START signal to xHandle_ultrasonic.");
   xTaskNotify( xHandle_ultrasonic, START_BIT, eSetBits);
 #endif
+
+#ifdef useLuna
+ ESP_LOGI("PROCESSOR_TASK", "Sending START signal to xHandle_luna.");
+  xTaskNotify( xHandle_luna, START_BIT, eSetBits);
+#endif
+
   #ifdef useUltrasound_2
    ESP_LOGI("PROCESSOR_TASK", "Sending START signal to xHandle_ultrasonic 2.");
   xTaskNotify( xHandle_ultrasonic_2, START_BIT, eSetBits);
@@ -2936,14 +3344,6 @@ ESP_LOGD("PROCESSOR_TASK", "Sending START signal to xHandle_GPS.");
 xTaskNotify( xHandle_GPS, START_BIT, eSetBits);
 #endif
 
-// 1. Declare a handle for the worker task
-//TaskHandle_t g_worker_task_handle = NULL;
-
-// xTaskNotifyGive(g_worker_task_handle);
-// ESP_LOGI("PROCESSOR_TASK", "vTaskResume( xHandle_vl53l5cx )");
-//vTaskResume( xHandle_vl53l5cx );
-//vl53l5cx_running = true;
-//}
 
  last_movement = current_time;
 
@@ -2977,6 +3377,11 @@ resetPins();
 #ifdef useGPS
 ESP_LOGD("PROCESSOR_TASK", "Sending STOP signal to xHandle_GPS.");
 xTaskNotify( xHandle_GPS, STOP_BIT, eSetBits);
+#endif
+
+#ifdef useLuna
+ ESP_LOGI("PROCESSOR_TASK", "Sending STOP signal to xHandle_luna.");
+  xTaskNotify( xHandle_luna, STOP_BIT, eSetBits);
 #endif
 
 //vTaskSuspend( xHandle_vl53l5cx );
@@ -3017,16 +3422,150 @@ last_roll = received_data.roll;
 
 
             // --- FUSED ORIENTATION DATA (Most Important Output) ---
-           ESP_LOGD("PROCESSOR_TASK", "Orientation -> Pitch: %.2f°, Roll: %.2f°", received_data.pitch, received_data.roll);
-        }
+           ESP_LOGD("PROCESSOR_TASK", "Orientation -> Pitch: %d°, Roll: %d°", (int) received_data.pitch, (int) received_data.roll);
+ 
+    stack_margin = uxTaskGetStackHighWaterMark(NULL);
+    ESP_LOGI("STACK", "Current margin: %u", stack_margin);
+        } // queue received
+
+
  vTaskDelay(pdMS_TO_TICKS(20));
 
 
     } // while 1
   //     esp_task_wdt_delete(NULL); 
-  
+
+     if (esp_task_wdt_status(NULL)){
+                        esp_task_wdt_delete(NULL);
+                    }
+
+
+
+  //esp_task_wdt_delete(NULL);
+ // esp_task_wdt_add(xTaskGetIdleTaskHandleForCPU(0));
+
 //  esp_task_wdt_add(NULL);
 }
+
+
+void data_processor_task(void *pvParameters) {
+    // Stack protection
+    // Get stack information
+     // 1. Initial stack check
+    UBaseType_t init_free_stack = uxTaskGetStackHighWaterMark(NULL);
+    ESP_LOGI("STACK", "Task created. Free stack: %u bytes", init_free_stack);
+    
+    // 2. Main variables (keep at top to maximize stack continuity)
+    mpu_data_t received_data;
+    const TickType_t queue_timeout = pdMS_TO_TICKS(1000);
+
+   while(1) {   
+
+        if(xQueueReceive(mpu_data_queue, &received_data, queue_timeout) == pdPASS) {
+            // Optimized float comparison
+            float pitch_diff = received_data.pitch - last_pitch;
+            float roll_diff = received_data.roll - last_roll;
+            
+            if(fabsf(pitch_diff) > acc_Move_limit || fabsf(roll_diff) > acc_Move_limit) {
+                // Integer-based logging
+                ESP_LOGI("MOVED", "P:+%d R:+%d", 
+                        (int)pitch_diff, (int)roll_diff);
+
+#ifdef useAudio
+//update_beeper_alerts(ALERT_MEDIUMFAR, 1);
+//playAudio(500, 1200);
+//playAudio(500, 1400);
+#endif
+#ifdef useVl53l5cx
+    ESP_LOGD("PROCESSOR_TASK", "Sending START signal to xHandle_vl53l5cx.");
+     xTaskNotify(xHandle_vl53l5cx, START_BIT, eSetBits);
+#endif
+
+#ifdef useUltrasound
+ ESP_LOGI("PROCESSOR_TASK", "Sending START signal to xHandle_ultrasonic.");
+  xTaskNotify( xHandle_ultrasonic, START_BIT, eSetBits);
+#endif
+
+#ifdef useLuna
+ ESP_LOGI("PROCESSOR_TASK", "Sending START signal to xHandle_luna.");
+  xTaskNotify( xHandle_luna, START_BIT, eSetBits);
+#endif
+
+  #ifdef useUltrasound_2
+   ESP_LOGI("PROCESSOR_TASK", "Sending START signal to xHandle_ultrasonic 2.");
+  xTaskNotify( xHandle_ultrasonic_2, START_BIT, eSetBits);
+#endif
+
+#ifdef useGPS
+ESP_LOGD("PROCESSOR_TASK", "Sending START signal to xHandle_GPS.");
+xTaskNotify( xHandle_GPS, START_BIT, eSetBits);
+#endif
+
+
+ last_movement = xTaskGetTickCount();
+
+} // > acc_Move_limit
+
+
+if (( xTaskGetTickCount() - last_movement ) > movement_timeout_msec * 1000){ //vl53l5cx_running && 
+// stop vl53l5cx task
+// ESP_LOGI("PROCESSOR_TASK", "vTaskSuspend( xHandle_vl53l5cx )");
+ //ESP_LOGD("PROCESSOR_TASK", "no movement, current_time %d last_movement %d", current_time, last_movement);
+
+resetPins();
+
+ //xSemaphoreGive(g_i2c_bus_mutex);
+//ESP_LOGD("MUTEX1", "Given g_i2c_bus mutex before vTaskSuspend");
+#ifdef useVl53l5cx
+ ESP_LOGD("PROCESSOR_TASK", "Sending STOP signal to worker.");
+ xTaskNotify(xHandle_vl53l5cx, STOP_BIT, eSetBits);
+ #endif
+
+ #ifdef useUltrasound
+ ESP_LOGI("PROCESSOR_TASK", "Sending STOP_BIT  to xHandle_ultrasonic .");
+    xTaskNotify( xHandle_ultrasonic, STOP_BIT, eSetBits);
+#endif
+
+#ifdef useUltrasound_2
+    xTaskNotify( xHandle_ultrasonic_2, STOP_BIT, eSetBits);
+#endif
+
+#ifdef useGPS
+ESP_LOGD("PROCESSOR_TASK", "Sending STOP signal to xHandle_GPS.");
+xTaskNotify( xHandle_GPS, STOP_BIT, eSetBits);
+#endif
+
+#ifdef useLuna
+ ESP_LOGI("PROCESSOR_TASK", "Sending STOP signal to xHandle_luna.");
+  xTaskNotify( xHandle_luna, STOP_BIT, eSetBits);
+#endif
+
+//vTaskSuspend( xHandle_vl53l5cx );
+//vl53l5cx_running = false;
+     
+} // 
+
+
+last_pitch = received_data.pitch;
+last_roll = received_data.roll;
+            
+        // 7. Yield with periodic stack checks
+        static uint32_t last_stack_check = 0;
+        if(xTaskGetTickCount() - last_stack_check > pdMS_TO_TICKS(5000)) {
+            UBaseType_t current_stack = uxTaskGetStackHighWaterMark(NULL);
+            ESP_LOGD("STACK", "Free stack: %u bytes | Used: %u bytes", 
+                    current_stack, 
+                    init_free_stack - current_stack);
+            last_stack_check = xTaskGetTickCount();
+        }
+
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+
+
+}
+
 
 #endif
 
@@ -3421,6 +3960,8 @@ void uart_task(void *pvParameters) {
 
 static uint32_t last_update_time = xTaskGetTickCount();
 static int alert_update_period = 50;
+
+
 //
 
 
@@ -3428,6 +3969,7 @@ static int alert_update_period = 50;
 void update_beeper_alerts(alert_level_t new_level, int direction) {
     // Visual alerts (unchanged)
 
+//xQueueSend(audioQueue, &new_level, pdMS_TO_TICKS(1000));
 //uint32_t last_update_time = xTaskGetTickCount();
 alwaysBeep = true;
 resetPins();
@@ -3545,7 +4087,7 @@ if (direction == 1){
  if(useAudioAlerts){
  ESP_LOGD(TAG, "sens1 xQueueSend to audioQueue", new_level);
  
-xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+xQueueSend(audioQueue, &new_level, pdMS_TO_TICKS(1000));
  }
 #endif
           //   ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
@@ -3561,7 +4103,7 @@ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
 
   #ifdef useAudio
  if(useAudioAlerts){
- xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ xQueueSend(audioQueue, &new_level, pdMS_TO_TICKS(1000));
  }
 #endif   
              gpio_set_level(RED_PIN_1, 1); 
@@ -3578,7 +4120,7 @@ break;
 
          #ifdef useAudio
  if(useAudioAlerts){
- xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ xQueueSend(audioQueue, &new_level, pdMS_TO_TICKS(1000));
  }
 #endif
 
@@ -3603,7 +4145,7 @@ break;
 #ifdef useAudio           
 
  if(useAudioAlerts){
- xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+ xQueueSend(audioQueue, &new_level, pdMS_TO_TICKS(1000));
  }
 #endif
             break;
@@ -3719,7 +4261,7 @@ if (direction == 2){
  //       xQueueOverwrite(audioAlertQueue, &new_level);
  #ifdef useAudio
 if(useAudioAlerts){
-xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+xQueueSend(audioQueue, &new_level, pdMS_TO_TICKS(1000));
  }
 #endif
           //   ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
@@ -3740,7 +4282,7 @@ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
  //       xQueueOverwrite(audioAlertQueue, &new_level);
  #ifdef useAudio
 if(useAudioAlerts){
-xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+xQueueSend(audioQueue, &new_level, pdMS_TO_TICKS(1000));
  }
 #endif
           //   ESP_LOGI(TAG, "new_level %d dir:%d", new_level, direction);
@@ -3756,7 +4298,7 @@ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
 
          #ifdef useAudio
             if(useAudioAlerts){
-xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+xQueueSend(audioQueue, &new_level, pdMS_TO_TICKS(1000));
  }
         #endif
 
@@ -3782,7 +4324,7 @@ xQueueSend(audioQueue, &new_level, portMAX_DELAY);
 
 // ESP_LOGI(TAG, "sens1 xQueueSend to audioQueue", new_level);
 if(useAudioAlerts){
-xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+xQueueSend(audioQueue, &new_level, pdMS_TO_TICKS(1000));
  }
 
 #endif
@@ -3856,7 +4398,7 @@ if (direction == 3){
 
          #ifdef useAudio
        //     if(useAudioAlerts){
-xQueueSend(audioQueue, &new_level, portMAX_DELAY);
+xQueueSend(audioQueue, &new_level, pdMS_TO_TICKS(1000));
  //}
         #endif
 
@@ -3889,6 +4431,9 @@ void system_monitor_task(void *pvParameters) {
     }
 }
 */
+
+
+
 
 #ifdef useVl53l5cx
 
@@ -4566,6 +5111,7 @@ void button_task(void *arg) {
                 buttons[i].last_change_time = now;
             }
         }
+        ESP_ERROR_CHECK(esp_task_wdt_reset());
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
@@ -4728,8 +5274,17 @@ useAudioAlerts = true ;
     // ultrasound_mutex
 //ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
 
-  ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
-   
+ // ESP_ERROR_CHECK(esp_task_wdt_add(NULL));
+       // Disable WDT for this task
+   // esp_task_wdt_delete(NULL);
+
+
+    // Remove watchdog monitoring of IDLE task
+//CHECK_ERROR_CODE(esp_task_wdt_delete(xTaskGetIdleTaskHandleForCPU(0)), ESP_OK);
+    // Add the current task to the monitoring list
+CHECK_ERROR_CODE(esp_task_wdt_add(NULL), ESP_OK);
+CHECK_ERROR_CODE(esp_task_wdt_status(NULL), ESP_OK);
+
 
     ultrasonic_sensor_t sensor = {
         .trigger_pin = TRIGGER_GPIO,
@@ -4760,6 +5315,12 @@ static int ultrasonic_update_period = 5;
 
 for (;;) {
 
+    CHECK_ERROR_CODE(esp_task_wdt_status(NULL), ESP_OK);
+   //  esp_task_wdt_add(NULL);
+//if (esp_task_wdt_status(NULL)){
+esp_task_wdt_reset();
+//}
+
 //    esp_task_wdt_delete(NULL); 
    
  // ESP_ERROR_CHECK(esp_task_wdt_reset());
@@ -4771,7 +5332,7 @@ for (;;) {
         xTaskNotifyWait(0,           /* Don't clear any bits on entry */
                         ULONG_MAX,   /* Clear all bits on exit */
                         &notification_value, /* Stores the notification value */
-                        portMAX_DELAY);      /* Block forever */
+                        pdMS_TO_TICKS(1000));      /* Block forever */
 
         // 2. Check if the START signal was received
         if (notification_value & START_BIT) {
@@ -4788,16 +5349,19 @@ uint32_t  min_time_between_ultrasound = 50;
 
     while (true)
     {
-   
-ESP_ERROR_CHECK(esp_task_wdt_reset());
+
+CHECK_ERROR_CODE(esp_task_wdt_status(NULL), ESP_OK);
+//if (esp_task_wdt_status(NULL)){
+esp_task_wdt_reset();
+//}
 
 
-  if (xSemaphoreTake(ultrasound_mutex, portMAX_DELAY) == pdTRUE) {
+  if (xSemaphoreTake(ultrasound_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
  ESP_LOGD(TAG, "ultrasound Got mutex .");
             alert_level_t alert_level = ALERT_VERYFAR;
     ///    alert_level_t alert_level_2 = ALERT_VERYFAR;
 
-
+//esp_task_wdt_add(NULL);
 
 //if (current_time - last_update_time > ultrasonic_update_period ) {
 // last_update_time = current_time;
@@ -4949,19 +5513,42 @@ else {
                 if (stop_signal_value & STOP_BIT) {
                     ESP_ERROR_CHECK(esp_task_wdt_reset()); //reset watchdo when idle
                     ESP_LOGI(TAG, "STOP signal for ultrasound loop.");
+
+
+                       if (esp_task_wdt_status(NULL)){
+                        esp_task_wdt_delete(NULL);
+                    }
+
+                    //esp_task_wdt_delete(NULL);
+
+
                     break; // Exit the inner "running" loop
                 }
+
+ESP_ERROR_CHECK(esp_task_wdt_reset());
+
 vTaskDelay(pdMS_TO_TICKS(100));
     }/// loop while true
     
-
+ESP_ERROR_CHECK(esp_task_wdt_reset());
 
 } // start semaphore
 
+ESP_ERROR_CHECK(esp_task_wdt_reset());
 vTaskDelay(pdMS_TO_TICKS(100));
-//esp_task_wdt_add(NULL);
 
-} // outer loop waiting for semaphore
+} // outer loop waiting for semaphore queue
+
+// Restore IDLE task monitoring when the task ends
+  //  esp_task_wdt_delete(NULL);
+
+   if (esp_task_wdt_status(NULL)){
+                        esp_task_wdt_delete(NULL);
+                    }
+
+
+//    esp_task_wdt_add(xTaskGetIdleTaskHandleForCPU(0));
+
 
 }
 #endif
@@ -5050,6 +5637,30 @@ extern "C" void app_main(void)
  //initialize_watchdog();
 // already auto inited in config
 
+ESP_LOGI("DEBUG", "Main stack: %d free", 
+        uxTaskGetStackHighWaterMark(NULL));
+
+
+#ifdef CONFIG_FREERTOS_GENERATE_RUN_TIME_STATS
+    start_cpu_monitor(); // Start periodic stats logging
+#endif
+
+
+
+#ifdef debugMode
+   // Start CPU monitoring (automatically cleans up when out of scope)
+   // static CPUMonitor monitor(5);  // Log every 5 seconds
+    // Option 1: Default interval (1 second)
+// static CPUMonitor monitor_default;
+    
+    // Option 2: Custom interval (5 seconds)
+    static CPUMonitor monitor_custom(5);
+
+//xTaskCreate(esp_timer_task, "esp_timer", 2048, NULL, 10, NULL); // Lower from 22
+//xTaskCreate(ipc_task, "ipc0", 1024, NULL, 8, NULL);  // Lower from 24
+//xTaskCreate(ipc_task, "ipc1", 1024, NULL, 8, NULL);
+#endif
+
 
  #ifdef useGPS_2  
     nmea_example_init_interface();
@@ -5074,7 +5685,18 @@ gpio_set_direction(GREEN_PIN_1, GPIO_MODE_OUTPUT);
 initialize_i2c();
 //xTaskCreate(i2c_task, "i2c_task", 4096, NULL, 10, NULL);
 
- xTaskCreate(tf_luna_task, "tf_luna", 4096, bus_handle, 5, NULL);
+// xTaskCreate(tf_luna_task, "tf_luna", 4096, bus_handle, 5, NULL);
+
+xTaskCreatePinnedToCore(
+                    tf_luna_task,   /* Function to implement the task */
+                    "tf_luna_task", /* Name of the task */
+                    1024 * 4,      /* Stack size in words */
+                    bus_handle,       /* Task input parameter */
+                    6,          /* Priority of the task */
+                    &xHandle_luna,       /* Task handle. */
+                    1);  /* Core where the task should run */
+ 
+
 /*
     i2c_port_t i2c_port = I2C_NUM_1;
 
@@ -5164,8 +5786,9 @@ xTaskCreatePinnedToCore(
  
  ESP_LOGI("MAIN", "GPS started");
 
+
     // start at wakeup
-       xTaskNotify( xHandle_GPS, START_BIT, eSetBits);
+    //  xTaskNotify( xHandle_GPS, START_BIT, eSetBits);
 
 #endif
 
@@ -5287,28 +5910,15 @@ ESP_LOGI(TAG, "VL53L5CX ULD ready! (Version: %s)", VL53L5CX_API_REVISION);
                     "ultrasonic_ranger", /* Name of the task */
                     1024 * 3,      /* Stack size in words */
                     NULL,       /* Task input parameter */
-                    5,          /* Priority of the task */
+                    6,          /* Priority of the task */
                     &xHandle_ultrasonic,       /* Task handle. */
                     0);  /* Core where the task should run */
 
 // start ultrasound immediately
 
+ //xTaskNotify( xHandle_ultrasonic, START_BIT, eSetBits);
 
- xTaskNotify( xHandle_ultrasonic, START_BIT, eSetBits);
 
-
-#endif
-//ultrasonic_ranger_2
-#ifdef useUltrasound_2
-xTaskCreatePinnedToCore(
-                    ultrasonic_ranger_2,   /* Function to implement the task */
-                    "ultrasonic_ranger_2", /* Name of the task */
-                    8192,      /* Stack size in words */
-                    NULL,       /* Task input parameter */
-                    5,          /* Priority of the task */
-                    &xHandle_ultrasonic_2,       /* Task handle. */
-                    0);  /* Core where the task should run */
-  //    xTaskCreate(ultrasonic_ranger, "ultrasonic_ranger", 8192 , NULL, 5, &xHandle_ultrasonic);
 #endif
 
 #ifdef useUartA02YYUW
@@ -5328,8 +5938,8 @@ ESP_LOGI("MAIN", "Creating task for Accelerometer");
 
 
 // --- MPU9250 Initialization ---
-    i2c_master_dev_handle_t mpu9250_dev_handle;
-    i2c_device_config_t mpu9250_dev_cfg = {
+static i2c_master_dev_handle_t mpu9250_dev_handle;
+static    i2c_device_config_t mpu9250_dev_cfg = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address = MPU9250_I2C_ADDRESS, // 0x68
         .scl_speed_hz = 100000,
@@ -5352,8 +5962,8 @@ ESP_LOGI("MAIN", "Creating task for Accelerometer");
 
     vTaskDelay(pdMS_TO_TICKS(100)); // Wait for the sensor to stabilize
 
-xTaskCreate(mpu9250_reader_task, "MPU Reader", 1024 * 3, mpu9250_dev_handle, 3, &xHandle_mpu);
-xTaskCreate(data_processor_task, "Data Processor", 1024 * 3, NULL, 3, &xHandle_mpu_processor);
+xTaskCreate(mpu9250_reader_task, "MPU Reader", 1024 * 3, mpu9250_dev_handle, 5, &xHandle_mpu);
+xTaskCreate(data_processor_task, "Data Processor", 1024 * 3, NULL, 5, &xHandle_mpu_processor);
     #endif
 
 // Static storage for task parameters
@@ -5513,14 +6123,14 @@ audio_mutex = xSemaphoreCreateMutex();
 
     button_event_t event;
 
-esp_err_t t_err = esp_timer_init();
- if (t_err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to esp_timer_init: %s", esp_err_to_name(t_err));
-        }
+//esp_err_t t_err = esp_timer_init();
+ //if (t_err != ESP_OK) {
+   //         ESP_LOGE(TAG, "Failed to esp_timer_init: %s", esp_err_to_name(t_err));
+    //    }
 
 
-  static unsigned long start_time1 = esp_timer_get_time();
-  static unsigned long start_time2 = esp_timer_get_time();
+ // static unsigned long start_time1 = esp_timer_get_time();
+ // static unsigned long start_time2 = esp_timer_get_time();
 
   /*
   if(millis() - start_time >= 10*1000) {
@@ -5534,16 +6144,59 @@ esp_err_t t_err = esp_timer_init();
   }
 */
 
+// In app_main(), after initializations:
+ESP_LOGI("MAIN", "Stack high water mark: %d", 
+        uxTaskGetStackHighWaterMark(NULL));
+// If < 512, increase CONFIG_ESP_MAIN_TASK_STACK_SIZE
 
+
+ ESP_LOGI("MAIN", "Starting delay loop");
+
+static int button_update_period = 200;
+static uint32_t last_button_time = xTaskGetTickCount();
+
+
+ while(true) {
+
+uint32_t current_time = xTaskGetTickCount();
+if (current_time - last_button_time > button_update_period ) {
+last_button_time = current_time;
+       if (get_button_event(&event, 100)) { // 100ms timeout
+            ESP_LOGI("BUTTON", "Pin %d: %s", event.pin, event.new_state ? "PRESSED" : "RELEASED");
+if (event.new_state == true && event.pin == ALERT_TYPE_PIN){
+useVibratorAlerts = !useVibratorAlerts;
+
+if(useVibratorAlerts){
+useAudioAlerts = false ;
+   }   else {
+useAudioAlerts = true ;
+    }
+}
+
+  } 
+            // Handle event
+} // start_time
+
+
+        vTaskDelay(pdMS_TO_TICKS(100)); // Prevent return
+}
+
+ /*
         while(1) {
 
-
-uint32_t current_time =  esp_timer_get_time();
-
+uint32_t current_time = xTaskGetTickCount();
 
 
- if(current_time - start_time1 >= 500) {
- start_time1 =  esp_timer_get_time();
+
+if (current_time - last_button_time > button_update_period ) {
+last_button_time = current_time;
+
+ ESP_LOGI("MAIN", "checking button");
+
+// ESP_ERROR_CHECK(esp_task_wdt_reset());
+
+//uint32_t current_time =  esp_timer_get_time();
+
 
         if (get_button_event(&event, 100)) { // 100ms timeout
             ESP_LOGI("BUTTON", "Pin %d: %s", event.pin, event.new_state ? "PRESSED" : "RELEASED");
@@ -5570,38 +6223,27 @@ useAudioAlerts = true ;
         } // start_time
 
 
+
 #ifdef useLunaX
 
- tf_luna_data_t data;
+ vTaskDelay(pdMS_TO_TICKS(10));
 
-if(current_time - start_time2 >= 700) {
-     start_time2 = esp_timer_get_time();
+    }
 
+    */
 
- //tf_luna_read_with_retry(&data);
- //ESP_LOGI("TF-LUNA", "Distance: %dcm | Strength: %d | Temp: %.1f°C", data.distance, data.strength, data.temperature);
-
-vTaskDelay(pdMS_TO_TICKS(200));
-
-        if (xQueueReceive(tf_luna_queue, &data, pdMS_TO_TICKS(1000)) == pdTRUE) {
-            ESP_LOGI("TF-LUNA", "Distance: %dcm | Strength: %d | Temp: %.1f°C",
-                    data.distance, data.strength, data.temperature);
-        }
 /*
-        if (tf_luna_get_latest(&latest)) {
-            ESP_LOGI("MAIN", "Distance: %dcm | Strength: %d | Temp: %.1fC",
-                    latest.distance, latest.strength, latest.temperature);
-        }
-       // vTaskDelay(pdMS_TO_TICKS(100));
-       */
-    }
- #endif
-
-
- //vTaskDelay(pdMS_TO_TICKS(100));
-
-    }
-
-
+ESP_LOGI("PRIORITIES", "Priorities - IDLE0: %d, MAIN: %d, Au: %d, mpu: %d, mpu_proc %d, sonar %d, GPS %d, luna %d", 
+    tskIDLE_PRIORITY, 
+    uxTaskPriorityGet(xTaskGetHandle("main")),
+ //   uxTaskPriorityGet(xTaskGetHandle("MPU Reader")));
+uxTaskPriorityGet(audioTaskHandle),
+uxTaskPriorityGet(xHandle_mpu),
+uxTaskPriorityGet(xHandle_mpu_processor),
+uxTaskPriorityGet(xHandle_ultrasonic),
+uxTaskPriorityGet(xHandle_GPS),
+uxTaskPriorityGet(xHandle_luna)
+);
+*/
 
 }
